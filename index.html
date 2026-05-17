@@ -15,6 +15,17 @@
 <link rel="apple-touch-icon" href="icons/icon-512.png">
 <link rel="icon" type="image/png" sizes="any" href="icons/icon-512.png">
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Supabase: URL + publishable (anon) key. The publishable key is
+     intentionally embedded in client code; security comes from
+     Row Level Security on the database side, not from key secrecy. -->
+<script>
+  window.SUPABASE_CONFIG = {
+    url: 'https://tkocbzknbposfghtkkkm.supabase.co',
+    key: 'sb_publishable_ZmvVzVrB5QU5xLem_XW-XQ_qEQur_9k'
+  };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -689,17 +700,15 @@
 
   <div class="card" style="gap:0;padding:16px">
     <div class="login-field">
-      <input class="login-input" type="text" id="login-username" placeholder="Username" autocomplete="username" autocorrect="off" autocapitalize="none" spellcheck="false">
+      <input class="login-input" type="email" id="login-email" placeholder="Email" autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
+      <!-- Display name is only shown in signup mode. Set via JS. -->
+      <input class="login-input" type="text" id="login-display-name" placeholder="Display name" autocomplete="name" style="display:none">
       <input class="login-input" type="password" id="login-password" placeholder="Password" autocomplete="current-password">
       <div class="login-error" id="login-error"></div>
+      <div class="login-info" id="login-info" style="display:none;color:var(--muted);font-size:12px;margin-bottom:8px;line-height:1.4"></div>
       <button class="btn-primary" id="login-submit-btn" onclick="handleLoginSubmit()" style="width:100%">Sign In</button>
+      <button class="btn-ghost" id="login-forgot-btn" onclick="handleForgotPassword()" style="width:100%;margin-top:8px;font-size:12px">Forgot password?</button>
     </div>
-  </div>
-
-  <!-- Existing users quick-pick (shown only when accounts exist) -->
-  <div id="existing-users-section" style="display:none">
-    <div class="card-title" style="padding:0 2px 8px">OR CHOOSE ACCOUNT</div>
-    <div class="login-users-list" id="existing-users-list"></div>
   </div>
 </div>
 
@@ -928,40 +937,51 @@ function escapeHtml(v) {
     .replace(/'/g, '&#39;');
 }
 
-// ═══════════════════════════ AUTH & MULTI-USER STORAGE ═══════════════════════════
-// Users registry: { username -> { passwordHash, displayName } }
-// Per-user data:  localStorage key = 'choirdata_' + username
+// ═══════════════════════════ AUTH (via Supabase) ═══════════════════════════
+// Auth is delegated to Supabase Auth: email + password with email
+// confirmation and password reset, all handled by Supabase JS.
+//
+// While Phase 1 only moves AUTH to the cloud, the setlists/songs/volume
+// blob still lives in localStorage for the moment (keyed per-user by
+// Supabase user id). Phase 2 will swap that out for live Supabase rows.
 
-function simpleHash(str) {
-  // Simple deterministic hash (not cryptographic, but fine for local storage)
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash) + str.charCodeAt(i);
-    hash |= 0;
-  }
-  return hash.toString(36);
+if (!window.supabase || !window.SUPABASE_CONFIG) {
+  console.error('Supabase JS client failed to load — auth will not work.');
+}
+const sb = window.supabase && window.supabase.createClient(
+  window.SUPABASE_CONFIG.url,
+  window.SUPABASE_CONFIG.key,
+  { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }
+);
+
+// React to login/logout/token-refresh/recovery events.
+if (sb) {
+  sb.auth.onAuthStateChange((event, session) => {
+    if (event === 'PASSWORD_RECOVERY') {
+      // User clicked a reset link in their email. Don't navigate them
+      // anywhere yet — prompt them to set a new password first.
+      promptForNewPassword();
+      return;
+    }
+    if (event === 'SIGNED_OUT') {
+      currentUser = null;
+      data = JSON.parse(JSON.stringify(DEFAULT_DATA));
+      state = { setlistIndex: 0, songIndex: 0 };
+      showLoginScreen();
+      return;
+    }
+    if (session && session.user && (!currentUser || currentUser.id !== session.user.id)) {
+      loginUser(session.user);
+    }
+  });
 }
 
-function getUsers() {
-  return JSON.parse(localStorage.getItem('choir_users') || '{}');
-}
-function saveUsers(users) {
-  localStorage.setItem('choir_users', JSON.stringify(users));
-}
-function getLoggedInUser() {
-  return localStorage.getItem('choir_current_user') || null;
-}
-function setLoggedInUser(username) {
-  localStorage.setItem('choir_current_user', username);
-}
-function clearLoggedInUser() {
-  localStorage.removeItem('choir_current_user');
-}
+// localStorage key for one user's setlist blob. Keyed by Supabase user
+// id (a UUID) so two accounts on the same device stay separated.
+function userDataKey(userId) { return 'choirdata_' + userId; }
 
-function userDataKey(username) { return 'choirdata_' + username; }
-
-function loadUserData(username) {
-  const raw = localStorage.getItem(userDataKey(username));
+function loadUserData(userId) {
+  const raw = localStorage.getItem(userDataKey(userId));
   return raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(DEFAULT_DATA));
 }
 
@@ -987,13 +1007,14 @@ const DEFAULT_DATA = {
   ]
 };
 
+// currentUser is { id, email, displayName } once logged in, else null.
 let currentUser = null;
 let state = { setlistIndex: 0, songIndex: 0 };
 let data = JSON.parse(JSON.stringify(DEFAULT_DATA)); // placeholder until login
 
 function saveData() {
   if (!currentUser) return;
-  localStorage.setItem(userDataKey(currentUser), JSON.stringify(data));
+  localStorage.setItem(userDataKey(currentUser.id), JSON.stringify(data));
 }
 
 function migrateNotes() {
@@ -1018,10 +1039,17 @@ function migrateNotes() {
   if (changed) saveData();
 }
 
-function loginUser(username) {
-  currentUser = username;
-  setLoggedInUser(username);
-  data = loadUserData(username);
+// Called when a Supabase session is established (after sign-in, after
+// signup-confirm, or restored from a previous session on page load).
+function loginUser(supabaseUser) {
+  currentUser = {
+    id: supabaseUser.id,
+    email: supabaseUser.email || '',
+    displayName: supabaseUser.user_metadata?.display_name
+      || (supabaseUser.email || '').split('@')[0]
+      || 'You'
+  };
+  data = loadUserData(currentUser.id);
   migrateNotes();
   state = { setlistIndex: 0, songIndex: 0 };
   updateUserHeaderDisplay();
@@ -1034,21 +1062,18 @@ function loginUser(username) {
 
 function updateUserHeaderDisplay() {
   if (!currentUser) return;
-  const users = getUsers();
-  const display = users[currentUser]?.displayName || currentUser;
-  document.getElementById('user-avatar-small').textContent = display.charAt(0).toUpperCase();
-  document.getElementById('user-name-small').textContent = display;
+  document.getElementById('user-avatar-small').textContent = currentUser.displayName.charAt(0).toUpperCase();
+  document.getElementById('user-name-small').textContent = currentUser.displayName;
 }
 
 function openUserMenu() {
-  const users = getUsers();
-  const display = users[currentUser]?.displayName || currentUser;
+  if (!currentUser) return;
   openModal('Account', `
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-      <div class="login-avatar" style="width:44px;height:44px;font-size:20px">${escapeHtml(display.charAt(0).toUpperCase())}</div>
+      <div class="login-avatar" style="width:44px;height:44px;font-size:20px">${escapeHtml(currentUser.displayName.charAt(0).toUpperCase())}</div>
       <div>
-        <div style="font-size:16px;font-family:'Playfair Display',serif">${escapeHtml(display)}</div>
-        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-top:2px">@${escapeHtml(currentUser)}</div>
+        <div style="font-size:16px;font-family:'Playfair Display',serif">${escapeHtml(currentUser.displayName)}</div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-top:2px">${escapeHtml(currentUser.email)}</div>
       </div>
     </div>
     <p style="color:var(--muted);font-size:12px;line-height:1.6">Your songs and setlists are saved to your account and will be here next time you sign in.</p>
@@ -1058,12 +1083,10 @@ function openUserMenu() {
   ]);
 }
 
-function logoutUser() {
-  currentUser = null;
-  clearLoggedInUser();
-  data = JSON.parse(JSON.stringify(DEFAULT_DATA));
-  state = { setlistIndex: 0, songIndex: 0 };
-  showLoginScreen();
+async function logoutUser() {
+  // The onAuthStateChange handler will clear currentUser and route us
+  // back to the login screen once signOut completes.
+  if (sb) await sb.auth.signOut();
 }
 
 function currentSetlist() { return data.setlists[state.setlistIndex]; }
@@ -2283,86 +2306,171 @@ function switchLoginTab(mode) {
   document.getElementById('tab-login').classList.toggle('active', mode === 'login');
   document.getElementById('tab-signup').classList.toggle('active', mode === 'signup');
   document.getElementById('login-submit-btn').textContent = mode === 'login' ? 'Sign In' : 'Create Account';
+  // Display name input is only relevant for signup.
+  document.getElementById('login-display-name').style.display = mode === 'signup' ? '' : 'none';
+  // Hint password autocomplete correctly.
+  document.getElementById('login-password').setAttribute(
+    'autocomplete', mode === 'signup' ? 'new-password' : 'current-password'
+  );
+  // Forgot-password only makes sense when signing in.
+  document.getElementById('login-forgot-btn').style.display = mode === 'login' ? '' : 'none';
   document.getElementById('login-error').textContent = '';
+  document.getElementById('login-info').style.display = 'none';
+  document.getElementById('login-info').textContent = '';
   document.getElementById('login-password').value = '';
 }
 
 function showLoginScreen() {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-login').classList.add('active');
-  loginMode = 'login';
-  document.getElementById('tab-login').classList.add('active');
-  document.getElementById('tab-signup').classList.remove('active');
-  document.getElementById('login-submit-btn').textContent = 'Sign In';
-  document.getElementById('login-username').value = '';
+  switchLoginTab('login');
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-display-name').value = '';
   document.getElementById('login-password').value = '';
-  document.getElementById('login-error').textContent = '';
-  renderExistingUsers();
 }
 
-function renderExistingUsers() {
-  const users = getUsers();
-  const usernames = Object.keys(users);
-  const section = document.getElementById('existing-users-section');
-  const list = document.getElementById('existing-users-list');
-  if (usernames.length === 0) { section.style.display = 'none'; return; }
-  section.style.display = 'block';
-  list.innerHTML = '';
-  usernames.forEach(u => {
-    const display = users[u].displayName || u;
-    const row = document.createElement('div');
-    row.className = 'login-user-row';
-    row.innerHTML = `
-      <div class="login-avatar">${escapeHtml(display.charAt(0).toUpperCase())}</div>
-      <div class="login-user-name">${escapeHtml(display)}</div>
-      <div class="login-user-hint">TAP TO SELECT</div>
-    `;
-    row.onclick = () => {
-      document.getElementById('login-username').value = u;
-      document.getElementById('login-password').focus();
-      if (loginMode !== 'login') switchLoginTab('login');
-    };
-    list.appendChild(row);
-  });
-}
-
-function handleLoginSubmit() {
-  const username = (document.getElementById('login-username').value || '').trim().toLowerCase();
-  const password = document.getElementById('login-password').value || '';
+function setLoginError(msg) {
   const errEl = document.getElementById('login-error');
+  const infoEl = document.getElementById('login-info');
+  errEl.textContent = msg || '';
+  infoEl.textContent = '';
+  infoEl.style.display = 'none';
+}
 
-  if (!username) { errEl.textContent = 'Please enter a username.'; return; }
-  if (!password) { errEl.textContent = 'Please enter a password.'; return; }
-  if (username.length < 2) { errEl.textContent = 'Username must be at least 2 characters.'; return; }
+function setLoginInfo(msg) {
+  const errEl = document.getElementById('login-error');
+  const infoEl = document.getElementById('login-info');
+  errEl.textContent = '';
+  infoEl.textContent = msg || '';
+  infoEl.style.display = msg ? '' : 'none';
+}
 
-  const users = getUsers();
+async function handleLoginSubmit() {
+  if (!sb) { setLoginError('Auth client failed to load. Check your internet connection.'); return; }
+  const email = (document.getElementById('login-email').value || '').trim();
+  const password = document.getElementById('login-password').value || '';
+  const displayName = (document.getElementById('login-display-name').value || '').trim();
 
-  if (loginMode === 'signup') {
-    if (users[username]) { errEl.textContent = 'That username is already taken.'; return; }
-    if (password.length < 4) { errEl.textContent = 'Password must be at least 4 characters.'; return; }
-    users[username] = { passwordHash: simpleHash(password), displayName: username };
-    saveUsers(users);
-    errEl.textContent = '';
-    loginUser(username);
-  } else {
-    if (!users[username]) { errEl.textContent = 'No account found with that username.'; return; }
-    if (users[username].passwordHash !== simpleHash(password)) { errEl.textContent = 'Incorrect password.'; return; }
-    errEl.textContent = '';
-    loginUser(username);
+  if (!email) { setLoginError('Please enter your email.'); return; }
+  if (!password) { setLoginError('Please enter your password.'); return; }
+  if (password.length < 6) { setLoginError('Password must be at least 6 characters.'); return; }
+
+  // Disable submit while we wait for Supabase so we don't double-submit.
+  const btn = document.getElementById('login-submit-btn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = loginMode === 'signup' ? 'Creating account…' : 'Signing in…';
+
+  try {
+    if (loginMode === 'signup') {
+      if (!displayName) { setLoginError('Please enter a display name.'); return; }
+      const { error } = await sb.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { display_name: displayName },
+          // Redirect target after the user clicks the email confirm link.
+          emailRedirectTo: location.origin + location.pathname
+        }
+      });
+      if (error) { setLoginError(error.message); return; }
+      // Supabase requires email confirmation by default. The session
+      // doesn't fire SIGNED_IN until the user clicks the link.
+      setLoginInfo('Check your inbox at ' + email + ' for a confirmation link, then come back and sign in.');
+      switchLoginTab('login');
+      document.getElementById('login-email').value = email;
+      // Keep the info message visible after switchLoginTab clears it.
+      setLoginInfo('Check your inbox at ' + email + ' for a confirmation link, then come back and sign in.');
+    } else {
+      const { error } = await sb.auth.signInWithPassword({ email, password });
+      if (error) { setLoginError(error.message); return; }
+      // onAuthStateChange will fire SIGNED_IN → loginUser(session.user).
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
   }
+}
+
+async function handleForgotPassword() {
+  if (!sb) return;
+  // Pre-fill with what they've typed in the email field (if anything).
+  const preset = (document.getElementById('login-email').value || '').trim();
+  openModal('Reset Password', `
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:12px">
+      Enter the email for your account. We'll send you a link to set a new password.
+    </p>
+    <input id="reset-email" class="login-input" type="email" placeholder="Email"
+           value="${escapeHtml(preset)}"
+           autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
+    <div id="reset-error" style="color:#ff6b6b;font-size:12px;margin-top:6px;min-height:14px"></div>
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Send Link', cls: 'btn-primary', onclick: async () => {
+      const email = (document.getElementById('reset-email').value || '').trim();
+      const errEl = document.getElementById('reset-error');
+      if (!email) { errEl.textContent = 'Please enter an email.'; return; }
+      const { error } = await sb.auth.resetPasswordForEmail(email, {
+        redirectTo: location.origin + location.pathname
+      });
+      if (error) { errEl.textContent = error.message; return; }
+      closeModal();
+      setLoginInfo('If that email has an account, a reset link is on its way.');
+    }}
+  ]);
+  setTimeout(() => document.getElementById('reset-email')?.focus(), 50);
+}
+
+// Triggered when Supabase fires PASSWORD_RECOVERY (user clicked a reset
+// link in their email and landed back in the app). We hold them on a
+// "set a new password" modal before letting them into the app.
+function promptForNewPassword() {
+  openModal('Set a New Password', `
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:12px">
+      Pick a new password for your account (at least 6 characters).
+    </p>
+    <input id="new-password" class="login-input" type="password" placeholder="New password"
+           autocomplete="new-password">
+    <div id="new-password-error" style="color:#ff6b6b;font-size:12px;margin-top:6px;min-height:14px"></div>
+  `, [
+    { label: 'Save', cls: 'btn-primary', onclick: async () => {
+      const newPwd = document.getElementById('new-password').value || '';
+      const errEl = document.getElementById('new-password-error');
+      if (newPwd.length < 6) { errEl.textContent = 'At least 6 characters, please.'; return; }
+      const { error } = await sb.auth.updateUser({ password: newPwd });
+      if (error) { errEl.textContent = error.message; return; }
+      closeModal();
+      // Strip the #recovery token from the URL so refresh doesn't re-trigger.
+      try { history.replaceState({}, '', location.pathname + location.search); } catch (e) {}
+      // The active session is still valid — onAuthStateChange may also
+      // have fired SIGNED_IN already; either way we now land in the app.
+      const { data: { session } } = await sb.auth.getSession();
+      if (session && session.user) loginUser(session.user);
+    }}
+  ]);
+  setTimeout(() => document.getElementById('new-password')?.focus(), 50);
 }
 
 // ═══════════════════════════ INIT ═══════════════════════════
 setupVolSlider();
 
-// Check if already logged in
-const _savedUser = getLoggedInUser();
-const _savedUsers = getUsers();
-if (_savedUser && _savedUsers[_savedUser]) {
-  loginUser(_savedUser);
-} else {
-  showLoginScreen();
-}
+// On boot, ask Supabase whether we already have a valid session
+// (returning user with a stored JWT). If so, go straight to the app;
+// otherwise show the login screen.
+(async function bootstrapAuth() {
+  if (!sb) { showLoginScreen(); return; }
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session && session.user) {
+      loginUser(session.user);
+    } else {
+      showLoginScreen();
+    }
+  } catch (e) {
+    console.warn('Auth bootstrap failed:', e);
+    showLoginScreen();
+  }
+})();
 
 // Pre-warm: decode sounds on first user gesture
 document.addEventListener('click', () => unlockAudio(), { once: true });
