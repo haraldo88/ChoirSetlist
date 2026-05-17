@@ -1,0 +1,16 @@
+# macOS Finder cruft
+.DS_Store
+**/.DS_Store
+
+# Editor temp files
+*~
+.vscode/
+.idea/
+
+# Orphan icon files left over from earlier consolidation.
+# (You can also just delete these from Finder.)
+icons/apple-touch-icon.png
+icons/apple-touch-icon-152.png
+icons/apple-touch-icon-167.png
+icons/apple-touch-icon-180.png
+icons/icon-192.png
