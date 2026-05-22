@@ -483,6 +483,40 @@
     border-left: 3px solid var(--accent);
   }
 
+  /* ─── Setlist row ⋯ menu button ─── */
+  .sl-row-menu-btn {
+    background: transparent; border: none; color: var(--muted);
+    font-size: 22px; font-weight: 700; line-height: 1;
+    padding: 4px 10px; margin-left: auto;
+    cursor: pointer; border-radius: 6px;
+    -webkit-tap-highlight-color: transparent;
+    min-width: 36px; min-height: 36px;
+  }
+  .sl-row-menu-btn:active { background: var(--surface2); color: var(--text); }
+
+  /* ─── Setlist row actions modal ─── */
+  /* Renders as a vertical list of full-width rows inside the modal body.
+     Uses the same modal scaffolding (openModal) the rest of the app uses. */
+  .sl-menu-item {
+    display: flex; align-items: center; gap: 14px;
+    width: 100%;
+    background: transparent; border: none;
+    color: var(--text);
+    padding: 14px 12px;
+    border-radius: 10px;
+    font-family: 'DM Mono', monospace; font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    transition: background .12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .sl-menu-item:active { background: var(--surface2); }
+  .sl-menu-item .sl-menu-icon {
+    font-size: 20px; width: 24px; text-align: center; flex-shrink: 0;
+  }
+  .sl-menu-item.danger { color: var(--danger); }
+  .sl-menu-item.danger:active { background: rgba(224,85,85,0.08); }
+
   /* ─── LOGIN SCREEN ─── */
   #screen-login {
     display: none; width: 100%; max-width: 480px;
@@ -493,6 +527,26 @@
     justify-content: center;
   }
   #screen-login.active { display: flex; }
+
+  /* Auth-loading screen shown briefly during bootstrapAuth */
+  #screen-auth-loading {
+    display: none; width: 100%; min-height: 100vh;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px;
+  }
+  #screen-auth-loading.active { display: flex; }
+
+  /* Sync-status pill in the header. Empty when 'synced' so it stays
+     out of the way unless something needs the user's attention. */
+  #sync-status {
+    font-size: 10px; letter-spacing: 1.5px; color: var(--muted);
+    padding: 2px 6px; border-radius: 6px; min-width: 14px;
+  }
+  #sync-status[data-state="synced"]  { color: transparent; }
+  #sync-status[data-state="saving"]  { color: var(--accent); }
+  #sync-status[data-state="pending"] { color: var(--accent); }
+  #sync-status[data-state="offline"] { color: #d9a44b; }
+  #sync-status[data-state="error"]   { color: #ff6b6b; }
   .login-logo {
     font-family: 'Playfair Display', serif;
     font-size: 38px; font-weight: 900;
@@ -624,10 +678,20 @@
 <body>
 <div id="app">
 
+<!-- ═══════════════════════════════ AUTH LOADING SCREEN ═══════════════════════════════ -->
+<!-- Shown while bootstrapAuth checks Supabase for a restored session.
+     Prevents the brief flash of the login screen on every page load.
+     Hidden via the CSS rule: #screen-auth-loading { display: none; ... } -->
+<div id="screen-auth-loading" class="active">
+  <div class="login-logo" style="font-size:32px">♩ Choir<br>Setlist</div>
+  <div style="color:var(--muted);font-size:11px;letter-spacing:2px">LOADING…</div>
+</div>
+
 <!-- ═══════════════════════════════ MAIN SCREEN ═══════════════════════════════ -->
-<div id="screen-main" class="screen active">
+<div id="screen-main" class="screen">
   <div class="header">
     <div class="header-title">Choir Setlist</div>
+    <span id="sync-status" data-state="synced" title="Sync status"></span>
     <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()">
       <span id="user-avatar-small" style="font-family:'Playfair Display',serif;font-weight:700"></span>
       <span id="user-name-small"></span>
@@ -689,7 +753,9 @@
 </div>
 
 <!-- ═══════════════════════════════ LOGIN SCREEN ═══════════════════════════════ -->
-<div id="screen-login" class="active">
+<!-- No "active" by default — bootstrapAuth decides whether to show this
+     screen or jump straight to the main app after restoring a session. -->
+<div id="screen-login">
   <div class="login-logo">♩ Choir<br>Setlist</div>
   <div class="login-sub">Sign in to your account</div>
 
@@ -826,37 +892,21 @@
 </div>
 
 <!-- ═══════════════════════════════ SETLIST SCREEN ═══════════════════════════════ -->
+<!-- Per-setlist actions (share, edit, copy, export, delete) live on the
+     three-dot ⋯ button on each row, so the header only needs Back and +. -->
 <div id="screen-setlist" class="screen">
   <div class="header">
     <button class="btn-icon" onclick="showScreen('screen-main')">←</button>
     <div class="header-title">Setlists</div>
-    <button class="btn-icon" onclick="importSetlist()" title="Import">⬇</button>
     <button class="btn-icon" onclick="addSetlist()" title="New Setlist">+</button>
-    <button class="btn-icon" id="setlist-edit-toggle" onclick="toggleSetlistEditMode()" title="Edit">✎</button>
-  </div>
-
-  <!-- Edit panel (hidden by default) -->
-  <div class="sl-edit-panel" id="sl-edit-panel" style="display:none">
-    <div class="sl-edit-panel-title" id="sl-edit-panel-title">SELECT A SETLIST TO EDIT</div>
-    <div class="sl-edit-name-row" id="sl-edit-name-row" style="display:none">
-      <input class="sl-edit-name-input" id="sl-edit-name-input" type="text" placeholder="Setlist name…">
-      <button class="btn-icon" onclick="saveSetlistName()" title="Save name">✓</button>
-    </div>
-    <div class="sl-edit-actions" id="sl-edit-actions" style="display:none">
-      <button class="sl-action-btn accent" onclick="exportSetlist()">
-        <span class="sl-action-icon">📤</span>Export & Email
-      </button>
-      <button class="sl-action-btn danger" onclick="deleteSetlistEdit()">
-        <span class="sl-action-icon">🗑</span>Delete
-      </button>
-    </div>
   </div>
 
   <div class="card" style="padding:0">
     <div class="list-scroll" id="setlist-list"></div>
   </div>
 
-  <!-- Hidden file input for import -->
+  <!-- Hidden file input for the Import-from-file flow (offered as a link
+       inside the New Setlist modal). -->
   <input type="file" id="import-file-input" accept=".choirset,.json" style="display:none" onchange="handleImportFile(event)">
 </div>
 
@@ -976,14 +1026,289 @@ if (sb) {
   });
 }
 
-// localStorage key for one user's setlist blob. Keyed by Supabase user
-// id (a UUID) so two accounts on the same device stay separated.
-function userDataKey(userId) { return 'choirdata_' + userId; }
+// ═══════════════════════════ DATA LAYER (Supabase + offline cache) ═══════════════════════════
+// The cloud is the source of truth; localStorage is a write-through cache
+// so the app boots instantly and keeps working offline. On any edit we
+// (1) save to the cache immediately, (2) schedule a debounced upsert to
+// Supabase, (3) flush the queue automatically when the network comes back.
+//
+// Each setlist and song carries a stable UUID. To handle deletes without
+// touching every splice() call, we keep a `lastSyncedIds` snapshot of the
+// IDs we last pushed to the cloud — anything in that set but not in the
+// current `data` was deleted locally and gets removed from Supabase on
+// the next sync.
 
-function loadUserData(userId) {
-  const raw = localStorage.getItem(userDataKey(userId));
-  return raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(DEFAULT_DATA));
+function userDataKey(userId)        { return 'choirdata_'    + userId; }
+function syncedIdsKey(userId)       { return 'choirsynced_'  + userId; }
+
+function loadCachedData(userId) {
+  try {
+    const raw = localStorage.getItem(userDataKey(userId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    console.warn('Failed to parse cached data:', e);
+    return null;
+  }
 }
+
+function saveCachedData(userId, d) {
+  try { localStorage.setItem(userDataKey(userId), JSON.stringify(d)); }
+  catch (e) { console.warn('Cache write failed:', e); }
+}
+
+function loadSyncedIds(userId) {
+  try {
+    const raw = localStorage.getItem(syncedIdsKey(userId));
+    if (!raw) return { setlists: [], songs: [] };
+    return JSON.parse(raw);
+  } catch (e) { return { setlists: [], songs: [] }; }
+}
+function saveSyncedIds(userId, ids) {
+  try { localStorage.setItem(syncedIdsKey(userId), JSON.stringify(ids)); }
+  catch (e) {}
+}
+
+// Generate stable UUIDs for any setlist/song missing one. Called every
+// time we save so newly-added items get an id before they're synced.
+function ensureIds(d) {
+  if (!d || !Array.isArray(d.setlists)) return;
+  d.setlists.forEach(sl => {
+    if (!sl.id) sl.id = newUuid();
+    if (!Array.isArray(sl.songs)) sl.songs = [];
+    sl.songs.forEach(s => { if (!s.id) s.id = newUuid(); });
+  });
+}
+function newUuid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  // Fallback for older browsers
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+// Pull this user's setlists + songs from Supabase. Falls back to the
+// localStorage cache when offline or on any error.
+async function fetchDataFromCloud(userId) {
+  if (!sb) throw new Error('Supabase client not initialised');
+  const { data: sls, error: e1 } = await sb
+    .from('setlists')
+    .select('id, name, position')
+    .eq('owner_id', userId)
+    .order('position', { ascending: true });
+  if (e1) throw e1;
+
+  const { data: songs, error: e2 } = await sb
+    .from('songs')
+    .select('id, setlist_id, name, time_sig, tempo, notes, position')
+    .in('setlist_id', (sls || []).map(s => s.id).concat(['00000000-0000-0000-0000-000000000000']))
+    .order('position', { ascending: true });
+  if (e2) throw e2;
+
+  // Stitch songs into their setlists
+  const byId = {};
+  (sls || []).forEach(sl => {
+    byId[sl.id] = { id: sl.id, name: sl.name, songs: [] };
+  });
+  (songs || []).forEach(row => {
+    const sl = byId[row.setlist_id];
+    if (!sl) return;
+    sl.songs.push({
+      id:    row.id,
+      name:  row.name || '',
+      time:  row.time_sig || '4/4',
+      tempo: row.tempo || 120,
+      notes: Array.isArray(row.notes) ? row.notes : []
+    });
+  });
+  const setlistsArr = (sls || []).map(sl => byId[sl.id]);
+
+  return {
+    volume:   (loadCachedData(userId) || {}).volume ?? DEFAULT_DATA.volume,
+    setlists: setlistsArr
+  };
+}
+
+// Load a user's data on login. Tries the cloud first, falls back to the
+// cache (or defaults for first-time users). For brand-new users with no
+// rows in Supabase, we seed the DEFAULT_DATA and push it up.
+async function loadUserData(userId) {
+  // Show cached version first if we have it (instant render); we'll
+  // refresh from the cloud underneath. This is what makes returning
+  // visits feel instant even on slow connections.
+  const cached = loadCachedData(userId);
+
+  if (navigator.onLine && sb) {
+    try {
+      const cloud = await fetchDataFromCloud(userId);
+      if (cloud.setlists.length === 0) {
+        // New user — seed with the demo setlists so the app isn't empty
+        const seeded = JSON.parse(JSON.stringify(DEFAULT_DATA));
+        ensureIds(seeded);
+        saveCachedData(userId, seeded);
+        // Schedule a sync so the seed shows up in Supabase too
+        setTimeout(() => { scheduleCloudSync(); }, 50);
+        return seeded;
+      }
+      ensureIds(cloud);
+      saveCachedData(userId, cloud);
+      // Update lastSyncedIds so deletion-diff works from this point on
+      const ids = {
+        setlists: cloud.setlists.map(sl => sl.id),
+        songs:    cloud.setlists.flatMap(sl => sl.songs.map(s => s.id))
+      };
+      saveSyncedIds(userId, ids);
+      return cloud;
+    } catch (e) {
+      console.warn('Cloud load failed, falling back to cache:', e);
+      setSyncStatus('offline');
+    }
+  } else {
+    setSyncStatus('offline');
+  }
+
+  // Offline (or cloud errored): use cache if any, else defaults
+  if (cached) { ensureIds(cached); return cached; }
+  const fresh = JSON.parse(JSON.stringify(DEFAULT_DATA));
+  ensureIds(fresh);
+  return fresh;
+}
+
+// ── Cloud sync engine ───────────────────────────────────────────────
+// Debounced upsert of the entire user data set to Supabase. Each call
+// to saveData() postpones the sync by SYNC_DEBOUNCE_MS, so a flurry of
+// keystrokes collapses into one network call. While a sync is running
+// any new saveData() call sets a "dirty again" flag and triggers a
+// second sync once the first finishes.
+
+const SYNC_DEBOUNCE_MS = 800;
+let _syncTimer        = null;   // pending setTimeout handle
+let _syncInFlight     = false;  // a sync is currently running
+let _syncDirtyAgain   = false;  // saveData() was called mid-sync
+
+function scheduleCloudSync() {
+  if (!currentUser || !sb) return;
+  if (_syncInFlight) { _syncDirtyAgain = true; return; }
+  if (_syncTimer) clearTimeout(_syncTimer);
+  setSyncStatus('pending');
+  _syncTimer = setTimeout(syncToCloud, SYNC_DEBOUNCE_MS);
+}
+
+async function syncToCloud() {
+  _syncTimer = null;
+  if (!currentUser || !sb) return;
+  if (!navigator.onLine) { setSyncStatus('offline'); return; }
+
+  // Snapshot the user id at the start so a logout mid-sync doesn't
+  // throw on the post-await access to currentUser.id.
+  const userId = currentUser.id;
+
+  _syncInFlight = true;
+  _syncDirtyAgain = false;
+  setSyncStatus('saving');
+
+  try {
+    ensureIds(data);
+
+    const setlistRows = data.setlists.map((sl, i) => ({
+      id:       sl.id,
+      owner_id: userId,
+      name:     sl.name || '',
+      position: i
+    }));
+
+    const songRows = [];
+    data.setlists.forEach(sl => {
+      (sl.songs || []).forEach((s, j) => {
+        songRows.push({
+          id:         s.id,
+          setlist_id: sl.id,
+          name:       s.name || '',
+          time_sig:   s.time || '4/4',
+          tempo:      s.tempo || 120,
+          notes:      Array.isArray(s.notes) ? s.notes : [],
+          position:   j
+        });
+      });
+    });
+
+    // Upserts: rows already in Supabase get updated, new rows inserted.
+    if (setlistRows.length) {
+      const { error } = await sb.from('setlists').upsert(setlistRows);
+      if (error) throw error;
+    }
+    if (songRows.length) {
+      const { error } = await sb.from('songs').upsert(songRows);
+      if (error) throw error;
+    }
+
+    // Diff-based delete: anything in lastSyncedIds that no longer
+    // exists locally was removed by the user and needs to be deleted
+    // from Supabase too. ON DELETE CASCADE on songs.setlist_id means
+    // deleting a setlist takes its songs with it, but we delete songs
+    // explicitly anyway so the diff stays correct.
+    const prev = loadSyncedIds(userId);
+    const curSetlistIds = new Set(setlistRows.map(r => r.id));
+    const curSongIds    = new Set(songRows.map(r => r.id));
+    const delSetlists = (prev.setlists || []).filter(id => !curSetlistIds.has(id));
+    const delSongs    = (prev.songs    || []).filter(id => !curSongIds.has(id));
+    if (delSongs.length) {
+      const { error } = await sb.from('songs').delete().in('id', delSongs);
+      if (error) console.warn('Song delete failed:', error);
+    }
+    if (delSetlists.length) {
+      const { error } = await sb.from('setlists').delete().in('id', delSetlists);
+      if (error) console.warn('Setlist delete failed:', error);
+    }
+
+    saveSyncedIds(userId, {
+      setlists: [...curSetlistIds],
+      songs:    [...curSongIds]
+    });
+
+    setSyncStatus('synced');
+  } catch (e) {
+    console.warn('Cloud sync failed:', e);
+    setSyncStatus(navigator.onLine ? 'error' : 'offline');
+    // Try again in a bit so transient failures self-heal
+    setTimeout(() => { if (currentUser) scheduleCloudSync(); }, 5000);
+  } finally {
+    _syncInFlight = false;
+    // Pick up any edits that landed while we were in flight
+    if (_syncDirtyAgain) {
+      _syncDirtyAgain = false;
+      scheduleCloudSync();
+    }
+  }
+}
+
+// Tiny status pill in the header. States: synced / saving / pending /
+// offline / error. We render text only — the CSS controls the dot color.
+function setSyncStatus(state) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  const labels = {
+    synced:  'Saved',
+    saving:  'Saving…',
+    pending: 'Saving…',
+    offline: 'Offline',
+    error:   'Retrying…'
+  };
+  el.dataset.state = state;
+  el.textContent = labels[state] || '';
+}
+
+// Flush pending writes when we come back online. The reverse direction
+// (offline) just updates the badge — saveData() keeps writing to the
+// cache and scheduleCloudSync() short-circuits while navigator.onLine
+// is false.
+window.addEventListener('online', () => {
+  setSyncStatus('pending');
+  if (currentUser) scheduleCloudSync();
+});
+window.addEventListener('offline', () => {
+  setSyncStatus('offline');
+});
 
 // ═══════════════════════════ STATE ═══════════════════════════
 const DEFAULT_DATA = {
@@ -1012,9 +1337,15 @@ let currentUser = null;
 let state = { setlistIndex: 0, songIndex: 0 };
 let data = JSON.parse(JSON.stringify(DEFAULT_DATA)); // placeholder until login
 
+// saveData() is called from every edit site. It writes to the local
+// cache immediately (so a refresh never loses work) and schedules a
+// debounced upsert to Supabase. If we're offline the call is queued
+// and flushed when the network comes back via the online listener.
 function saveData() {
   if (!currentUser) return;
-  localStorage.setItem(userDataKey(currentUser.id), JSON.stringify(data));
+  ensureIds(data);
+  saveCachedData(currentUser.id, data);
+  scheduleCloudSync();
 }
 
 function migrateNotes() {
@@ -1041,7 +1372,7 @@ function migrateNotes() {
 
 // Called when a Supabase session is established (after sign-in, after
 // signup-confirm, or restored from a previous session on page load).
-function loginUser(supabaseUser) {
+async function loginUser(supabaseUser) {
   currentUser = {
     id: supabaseUser.id,
     email: supabaseUser.email || '',
@@ -1049,7 +1380,7 @@ function loginUser(supabaseUser) {
       || (supabaseUser.email || '').split('@')[0]
       || 'You'
   };
-  data = loadUserData(currentUser.id);
+  data = await loadUserData(currentUser.id);
   migrateNotes();
   state = { setlistIndex: 0, songIndex: 0 };
   updateUserHeaderDisplay();
@@ -1058,6 +1389,9 @@ function loginUser(supabaseUser) {
   renderDots('dots-main', currentSong()?.time || '4/4');
   setupVolSlider();
   updateVolDisplay();
+  // After login, make sure any local-only edits from a past offline
+  // session get pushed up. scheduleCloudSync() is idempotent.
+  scheduleCloudSync();
 }
 
 function updateUserHeaderDisplay() {
@@ -1097,6 +1431,7 @@ function currentSong() {
 
 // ═══════════════════════════ SCREEN NAV ═══════════════════════════
 function showScreen(id) {
+  document.getElementById('screen-auth-loading').classList.remove('active');
   document.getElementById('screen-login').classList.remove('active');
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -1950,76 +2285,126 @@ function deleteSong(i) {
   ]);
 }
 
-// ═══════════════════════════ SETLIST ═══════════════════════════
-let setlistEditMode = false;
-let setlistEditIndex = null; // which setlist is selected in edit mode
+// ═══════════════════════════ SETLIST ROW ACTIONS ═══════════════════════════
+// Each row in the setlists screen has a ⋯ button on the right. Tapping
+// it opens this modal with the five per-setlist actions. All handlers
+// take an explicit index instead of relying on a "currently being edited"
+// global — that way deep links / multiple modals can't get confused.
 
-function toggleSetlistEditMode() {
-  setlistEditMode = !setlistEditMode;
-  setlistEditIndex = null;
-  const btn = document.getElementById('setlist-edit-toggle');
-  const panel = document.getElementById('sl-edit-panel');
-  if (setlistEditMode) {
-    btn.style.borderColor = 'var(--accent)';
-    btn.style.color = 'var(--accent)';
-    panel.style.display = 'flex';
-    document.getElementById('sl-edit-name-row').style.display = 'none';
-    document.getElementById('sl-edit-actions').style.display = 'none';
-    document.getElementById('sl-edit-panel-title').textContent = 'SELECT A SETLIST TO EDIT';
-  } else {
-    btn.style.borderColor = '';
-    btn.style.color = '';
-    panel.style.display = 'none';
-  }
-  renderSetlist();
-}
-
-function selectSetlistForEdit(i) {
-  setlistEditIndex = i;
+function openSetlistRowMenu(event, i) {
+  // Stop the row's own click handler from firing (which would navigate
+  // away to the main screen).
+  if (event) { event.stopPropagation(); event.preventDefault(); }
   const sl = data.setlists[i];
-  document.getElementById('sl-edit-panel-title').textContent = 'EDITING: ' + sl.name.toUpperCase();
-  document.getElementById('sl-edit-name-input').value = sl.name;
-  document.getElementById('sl-edit-name-row').style.display = 'flex';
-  document.getElementById('sl-edit-actions').style.display = 'grid';
-  renderSetlist();
+  if (!sl) return;
+
+  // Each item is rendered as a full-width button so it's comfy to tap
+  // on a phone. The icon column is fixed-width so the labels line up.
+  // data-action is read by the click delegate below.
+  const itemsHtml = `
+    <button class="sl-menu-item"        data-action="share">
+      <span class="sl-menu-icon">👥</span> Share setlist
+    </button>
+    <button class="sl-menu-item"        data-action="edit">
+      <span class="sl-menu-icon">✎</span> Edit setlist
+    </button>
+    <button class="sl-menu-item"        data-action="copy">
+      <span class="sl-menu-icon">❏</span> Copy setlist
+    </button>
+    <button class="sl-menu-item"        data-action="export">
+      <span class="sl-menu-icon">⬇</span> Export to file
+    </button>
+    <button class="sl-menu-item danger" data-action="delete">
+      <span class="sl-menu-icon">🗑</span> Delete setlist
+    </button>
+  `;
+
+  openModal(escapeHtml(sl.name), itemsHtml, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal }
+  ]);
+
+  // One click handler for the whole list — cheaper than wiring up five.
+  document.getElementById('modal-body').onclick = (e) => {
+    const btn = e.target.closest('.sl-menu-item');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    // Close this menu before opening the next modal so they don't stack.
+    closeModal();
+    if (action === 'share')  shareSetlist(i);
+    if (action === 'edit')   editSetlistAt(i);
+    if (action === 'copy')   copySetlist(i);
+    if (action === 'export') exportSetlistAt(i);
+    if (action === 'delete') deleteSetlistAt(i);
+  };
 }
 
-function saveSetlistName() {
-  if (setlistEditIndex === null) return;
-  const name = document.getElementById('sl-edit-name-input').value.trim();
-  if (!name) return;
-  data.setlists[setlistEditIndex].name = name;
+// ── Edit (rename) ──────────────────────────────────────────────────
+function editSetlistAt(i) {
+  const sl = data.setlists[i];
+  if (!sl) return;
+  openModal('Edit Setlist', `
+    <input class="login-input" type="text" id="sl-rename-input"
+           value="${escapeHtml(sl.name)}" placeholder="Setlist name…">
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Save', cls: 'btn-primary', onclick: () => {
+      const name = (document.getElementById('sl-rename-input').value || '').trim();
+      if (!name) return;
+      data.setlists[i].name = name;
+      saveData();
+      closeModal();
+      renderSetlist();
+      renderMain();
+    }}
+  ]);
+  setTimeout(() => {
+    const el = document.getElementById('sl-rename-input');
+    if (el) { el.focus(); el.select(); }
+  }, 50);
+}
+
+// ── Copy ───────────────────────────────────────────────────────────
+// Deep-clone the setlist (so songs stay independent), strip every ID so
+// ensureIds() will assign fresh ones on the next save, and prepend
+// "Copy of " to the name. Lands right after the original in the list.
+function copySetlist(i) {
+  const src = data.setlists[i];
+  if (!src) return;
+  const clone = JSON.parse(JSON.stringify(src));
+  delete clone.id;
+  (clone.songs || []).forEach(s => { delete s.id; });
+  clone.name = 'Copy of ' + (src.name || 'Setlist');
+  data.setlists.splice(i + 1, 0, clone);
+  state.setlistIndex = i + 1;
+  state.songIndex = 0;
   saveData();
-  document.getElementById('sl-edit-panel-title').textContent = 'EDITING: ' + name.toUpperCase();
   renderSetlist();
   renderMain();
 }
 
-function deleteSetlistEdit() {
-  if (setlistEditIndex === null) return;
-  const sl = data.setlists[setlistEditIndex];
+// ── Delete ─────────────────────────────────────────────────────────
+function deleteSetlistAt(i) {
+  const sl = data.setlists[i];
+  if (!sl) return;
   openModal('Delete Setlist', `<p style="color:var(--muted)">Delete "${escapeHtml(sl.name)}" and all its songs?</p>`, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Delete', cls: 'btn-primary btn-danger', onclick: () => {
       if (data.setlists.length <= 1) { closeModal(); return alert('Cannot delete the last setlist.'); }
-      data.setlists.splice(setlistEditIndex, 1);
+      data.setlists.splice(i, 1);
       if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
       state.songIndex = 0;
-      setlistEditIndex = null;
       saveData();
       closeModal();
-      document.getElementById('sl-edit-name-row').style.display = 'none';
-      document.getElementById('sl-edit-actions').style.display = 'none';
-      document.getElementById('sl-edit-panel-title').textContent = 'SELECT A SETLIST TO EDIT';
       renderSetlist();
       renderMain();
     }}
   ]);
 }
 
-function exportSetlist() {
-  if (setlistEditIndex === null) return;
-  const sl = data.setlists[setlistEditIndex];
+// ── Export to file (Web Share API → mailto fallback) ───────────────
+function exportSetlistAt(i) {
+  const sl = data.setlists[i];
+  if (!sl) return;
   const exportObj = {
     _type: 'choirset_v1',
     exported: new Date().toISOString(),
@@ -2027,11 +2412,8 @@ function exportSetlist() {
   };
   const json = JSON.stringify(exportObj, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
 
-  // Try to share via Web Share API (best on iOS), fall back to mailto, then download
   const fileName = sl.name.replace(/[^a-z0-9]/gi, '_') + '.choirset';
-
   if (navigator.share && navigator.canShare) {
     const file = new File([blob], fileName, { type: 'application/json' });
     if (navigator.canShare({ files: [file] })) {
@@ -2043,12 +2425,81 @@ function exportSetlist() {
       return;
     }
   }
-
-  // Fallback: mailto with data URI (opens Mail on iPhone)
-  const b64 = btoa(unescape(encodeURIComponent(json)));
-  const mailtoLink = `mailto:?subject=${encodeURIComponent('Choir Setlist: ' + sl.name)}&body=${encodeURIComponent('Here is the setlist "' + sl.name + '" exported from Choir Conductor.\n\nTo import it:\n1. Save the attached .choirset content as a file\n2. Open the app and tap the ⬇ Import button on the Setlists page\n\n--- BEGIN SETLIST DATA ---\n' + json + '\n--- END SETLIST DATA ---')}`;
+  // Fallback: open the user's mail client with the JSON inline so they
+  // can paste it into an attachment.
+  const mailtoLink = `mailto:?subject=${encodeURIComponent('Choir Setlist: ' + sl.name)}&body=${encodeURIComponent('Here is the setlist "' + sl.name + '" exported from Choir Conductor.\n\n--- BEGIN SETLIST DATA ---\n' + json + '\n--- END SETLIST DATA ---')}`;
   window.location.href = mailtoLink;
 }
+
+// ── Share via Supabase ────────────────────────────────────────────
+// Opens a modal with: recipient email + view/edit permission picker.
+// Hits the share_setlist_by_email RPC (which looks up the user by email
+// and inserts/updates the setlist_shares row in a single round trip).
+function shareSetlist(i) {
+  const sl = data.setlists[i];
+  if (!sl) return;
+  if (!sb) {
+    openModal('Share Unavailable', `<p style="color:var(--muted)">You need to be online to share setlists.</p>`, [
+      { label: 'OK', onclick: closeModal }
+    ]);
+    return;
+  }
+  if (!sl.id) {
+    // Brand-new setlist that hasn't been synced yet. Force a save so
+    // ensureIds assigns it an id, then queue a sync.
+    saveData();
+  }
+  openModal('Share Setlist', `
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:10px">
+      Enter the email of someone with a Choir Setlist account. They'll
+      see "<strong style="color:var(--text)">${escapeHtml(sl.name)}</strong>" in their app.
+    </p>
+    <input id="share-email" class="login-input" type="email" placeholder="recipient@example.com"
+           autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
+    <div style="display:flex;gap:8px;margin-top:6px">
+      <label style="flex:1;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+        <input type="radio" name="share-perm" value="view" checked> View only
+      </label>
+      <label style="flex:1;display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+        <input type="radio" name="share-perm" value="edit"> Can edit
+      </label>
+    </div>
+    <div id="share-status" style="font-size:12px;margin-top:8px;min-height:14px"></div>
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Share', cls: 'btn-primary', onclick: async () => {
+      const email = (document.getElementById('share-email').value || '').trim();
+      const perm  = (document.querySelector('input[name="share-perm"]:checked') || {}).value || 'view';
+      const statusEl = document.getElementById('share-status');
+      if (!email) { statusEl.style.color = '#ff6b6b'; statusEl.textContent = 'Please enter an email.'; return; }
+      statusEl.style.color = 'var(--muted)';
+      statusEl.textContent = 'Sharing…';
+      try {
+        const { data: res, error } = await sb.rpc('share_setlist_by_email', {
+          p_setlist_id: data.setlists[i].id,
+          p_recipient_email: email,
+          p_permission: perm
+        });
+        if (error) throw error;
+        if (res && res.ok === false) {
+          statusEl.style.color = '#ff6b6b';
+          statusEl.textContent = res.error || 'Could not share.';
+          return;
+        }
+        statusEl.style.color = 'var(--accent)';
+        statusEl.textContent = 'Shared with ' + email + '.';
+        setTimeout(closeModal, 1200);
+      } catch (e) {
+        statusEl.style.color = '#ff6b6b';
+        statusEl.textContent = (e && e.message) || 'Sharing failed. Are you online?';
+      }
+    }}
+  ]);
+  setTimeout(() => document.getElementById('share-email')?.focus(), 50);
+}
+
+// Back-compat stubs in case anything else in the file calls them.
+function toggleSetlistEditMode() { /* removed — actions now live on each row */ }
 
 function importSetlist() {
   document.getElementById('import-file-input').click();
@@ -2148,24 +2599,24 @@ function renderSetlist() {
   data.setlists.forEach((sl, i) => {
     const row = document.createElement('div');
     const isActive = i === state.setlistIndex;
-    const isEditSelected = setlistEditMode && i === setlistEditIndex;
-    row.className = 'list-row' + (isActive ? ' selected' : '') + (isEditSelected ? ' sl-selected' : '');
+    row.className = 'list-row' + (isActive ? ' selected' : '');
     row.dataset.index = i;
+    // The ⋯ button stops click propagation so tapping it doesn't also
+    // select the setlist underneath. event.stopPropagation lives in
+    // openSetlistRowMenu so we can keep the handler inline-clean here.
     row.innerHTML = `
       <span class="drag-handle" title="Drag to reorder">⠿</span>
       <span class="list-idx">${i + 1}</span>
       <span class="list-name">${escapeHtml(sl.name)}</span>
-      <span style="font-size:10px;color:var(--muted)">${sl.songs.length} song${sl.songs.length !== 1 ? 's' : ''}</span>`;
+      <span style="font-size:10px;color:var(--muted)">${sl.songs.length} song${sl.songs.length !== 1 ? 's' : ''}</span>
+      <button class="sl-row-menu-btn" title="More" onclick="openSetlistRowMenu(event, ${i})">⋯</button>`;
     row.onclick = (e) => {
       if (e.target.classList.contains('drag-handle')) return;
-      if (setlistEditMode) {
-        selectSetlistForEdit(i);
-      } else {
-        state.setlistIndex = i;
-        state.songIndex = 0;
-        renderSetlist();
-        showScreen('screen-main');
-      }
+      if (e.target.classList.contains('sl-row-menu-btn')) return;
+      state.setlistIndex = i;
+      state.songIndex = 0;
+      renderSetlist();
+      showScreen('screen-main');
     };
     list.appendChild(row);
   });
@@ -2176,16 +2627,23 @@ function renderSetlist() {
     if (state.setlistIndex === fromIdx) state.setlistIndex = toIdx;
     else if (state.setlistIndex > fromIdx && state.setlistIndex <= toIdx) state.setlistIndex--;
     else if (state.setlistIndex < fromIdx && state.setlistIndex >= toIdx) state.setlistIndex++;
-    if (setlistEditIndex === fromIdx) setlistEditIndex = toIdx;
-    else if (setlistEditIndex > fromIdx && setlistEditIndex <= toIdx) setlistEditIndex--;
-    else if (setlistEditIndex !== null && setlistEditIndex < fromIdx && setlistEditIndex >= toIdx) setlistEditIndex++;
     saveData();
     renderSetlist();
   });
 }
 
 function addSetlist() {
-  openModal('New Setlist', `<input type="text" id="new-sl-name" placeholder="Setlist name…">`, [
+  // The ⬇ Import button used to live in the header next to +. We folded
+  // it into this modal as a small link so the header stays uncluttered.
+  openModal('New Setlist', `
+    <input type="text" id="new-sl-name" placeholder="Setlist name…">
+    <div style="margin-top:10px;text-align:center">
+      <button class="btn-ghost" style="font-size:11px;letter-spacing:1px"
+              onclick="closeModal(); importSetlist();">
+        ⬇  OR IMPORT FROM FILE
+      </button>
+    </div>
+  `, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Create', cls: 'btn-primary', onclick: () => {
       const name = document.getElementById('new-sl-name').value.trim() || 'Unnamed Setlist';
@@ -2200,12 +2658,14 @@ function addSetlist() {
   setTimeout(() => document.getElementById('new-sl-name')?.focus(), 50);
 }
 
-// Keep old openEditSetlist stub so no broken refs
-function openEditSetlist() { toggleSetlistEditMode(); }
-
-function deleteSetlist() {
-  deleteSetlistEdit();
-}
+// Back-compat stubs — older code paths in this file may still reference
+// these names. They now forward to the parameterised handlers.
+function openEditSetlist() { /* no-op — edit is per-row via openSetlistRowMenu */ }
+function deleteSetlist()    { if (state.setlistIndex != null) deleteSetlistAt(state.setlistIndex); }
+function deleteSetlistEdit(){ if (state.setlistIndex != null) deleteSetlistAt(state.setlistIndex); }
+function exportSetlist()    { if (state.setlistIndex != null) exportSetlistAt(state.setlistIndex); }
+function saveSetlistName()  { /* no-op — rename is via editSetlistAt(i) */ }
+function selectSetlistForEdit(i) { editSetlistAt(i); }
 
 // ═══════════════════════════ DRAG-TO-REORDER ═══════════════════════════
 function setupDragReorder(container, onReorder) {
@@ -2321,6 +2781,7 @@ function switchLoginTab(mode) {
 }
 
 function showLoginScreen() {
+  document.getElementById('screen-auth-loading').classList.remove('active');
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-login').classList.add('active');
   switchLoginTab('login');
@@ -2462,7 +2923,11 @@ setupVolSlider();
   try {
     const { data: { session } } = await sb.auth.getSession();
     if (session && session.user) {
-      loginUser(session.user);
+      // The onAuthStateChange listener may have already fired SIGNED_IN
+      // and called loginUser(); avoid running it twice.
+      if (!currentUser || currentUser.id !== session.user.id) {
+        await loginUser(session.user);
+      }
     } else {
       showLoginScreen();
     }
