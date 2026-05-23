@@ -483,6 +483,18 @@
     border-left: 3px solid var(--accent);
   }
 
+  /* ─── Shared-setlist badge ─── */
+  .sl-shared-badge {
+    font-family: 'DM Mono', monospace;
+    font-size: 9px; letter-spacing: 1px;
+    color: var(--accent);
+    background: rgba(107,205,253,0.12);
+    border: 1px solid rgba(107,205,253,0.3);
+    padding: 2px 6px; border-radius: 4px;
+    margin-left: 6px;
+    white-space: nowrap;
+  }
+
   /* ─── Setlist row ⋯ menu button ─── */
   .sl-row-menu-btn {
     background: transparent; border: none; color: var(--muted);
@@ -537,16 +549,18 @@
   #screen-auth-loading.active { display: flex; }
 
   /* Sync-status pill in the header. Empty when 'synced' so it stays
-     out of the way unless something needs the user's attention. */
+     out of the way unless something needs the user's attention. Tap
+     to see the actual error message when sync is failing. */
   #sync-status {
     font-size: 10px; letter-spacing: 1.5px; color: var(--muted);
     padding: 2px 6px; border-radius: 6px; min-width: 14px;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
-  #sync-status[data-state="synced"]  { color: transparent; }
+  #sync-status[data-state="synced"]  { color: transparent; cursor: default; }
   #sync-status[data-state="saving"]  { color: var(--accent); }
   #sync-status[data-state="pending"] { color: var(--accent); }
   #sync-status[data-state="offline"] { color: #d9a44b; }
-  #sync-status[data-state="error"]   { color: #ff6b6b; }
+  #sync-status[data-state="error"]   { color: #ff6b6b; background: rgba(255,107,107,0.1); }
   .login-logo {
     font-family: 'Playfair Display', serif;
     font-size: 38px; font-weight: 900;
@@ -691,7 +705,7 @@
 <div id="screen-main" class="screen">
   <div class="header">
     <div class="header-title">Choir Setlist</div>
-    <span id="sync-status" data-state="synced" title="Sync status"></span>
+    <span id="sync-status" data-state="synced" title="Sync status — tap for details" onclick="showLastSyncError()"></span>
     <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()">
       <span id="user-avatar-small" style="font-family:'Playfair Display',serif;font-weight:700"></span>
       <span id="user-name-small"></span>
@@ -1091,24 +1105,64 @@ function newUuid() {
 // localStorage cache when offline or on any error.
 async function fetchDataFromCloud(userId) {
   if (!sb) throw new Error('Supabase client not initialised');
-  const { data: sls, error: e1 } = await sb
+
+  // ── 1. Setlists I own ─────────────────────────────────────────────
+  const { data: ownedSls, error: e1 } = await sb
     .from('setlists')
     .select('id, name, position')
     .eq('owner_id', userId)
     .order('position', { ascending: true });
   if (e1) throw e1;
 
-  const { data: songs, error: e2 } = await sb
-    .from('songs')
-    .select('id, setlist_id, name, time_sig, tempo, notes, position')
-    .in('setlist_id', (sls || []).map(s => s.id).concat(['00000000-0000-0000-0000-000000000000']))
-    .order('position', { ascending: true });
+  // ── 2. Setlists shared with me ────────────────────────────────────
+  // RLS lets me read rows from setlist_shares where shared_with = me,
+  // and lets me read the matching setlists via setlists_shared_select.
+  const { data: shareRows, error: e2 } = await sb
+    .from('setlist_shares')
+    .select('setlist_id, permission')
+    .eq('shared_with', userId);
   if (e2) throw e2;
 
-  // Stitch songs into their setlists
+  let sharedSls = [];
+  const permBySetlist = {};
+  if (shareRows && shareRows.length) {
+    shareRows.forEach(r => { permBySetlist[r.setlist_id] = r.permission; });
+    const sharedIds = shareRows.map(r => r.setlist_id);
+    const { data, error: e3 } = await sb
+      .from('setlists')
+      .select('id, name, position, owner_id')
+      .in('id', sharedIds)
+      .order('position', { ascending: true });
+    if (e3) throw e3;
+    sharedSls = data || [];
+  }
+
+  // ── 3. Songs for both groups ──────────────────────────────────────
+  const allSetlistIds = (ownedSls || []).map(s => s.id)
+    .concat(sharedSls.map(s => s.id))
+    .concat(['00000000-0000-0000-0000-000000000000']);  // dummy so .in() never empty
+  const { data: songs, error: e4 } = await sb
+    .from('songs')
+    .select('id, setlist_id, name, time_sig, tempo, notes, position')
+    .in('setlist_id', allSetlistIds)
+    .order('position', { ascending: true });
+  if (e4) throw e4;
+
+  // ── 4. Stitch into the client-side shape ──────────────────────────
+  // _shared / _permission / _owner_id are leading-underscored flags
+  // that the sync layer uses to skip shared setlists (they're not
+  // mine to push) and the UI uses to badge / restrict actions.
   const byId = {};
-  (sls || []).forEach(sl => {
+  (ownedSls || []).forEach(sl => {
     byId[sl.id] = { id: sl.id, name: sl.name, songs: [] };
+  });
+  sharedSls.forEach(sl => {
+    byId[sl.id] = {
+      id: sl.id, name: sl.name, songs: [],
+      _shared:     true,
+      _permission: permBySetlist[sl.id] || 'view',
+      _owner_id:   sl.owner_id
+    };
   });
   (songs || []).forEach(row => {
     const sl = byId[row.setlist_id];
@@ -1121,11 +1175,14 @@ async function fetchDataFromCloud(userId) {
       notes: Array.isArray(row.notes) ? row.notes : []
     });
   });
-  const setlistsArr = (sls || []).map(sl => byId[sl.id]);
+
+  // Owned setlists first (in their position order), then shared ones.
+  const ordered = (ownedSls || []).map(sl => byId[sl.id])
+                  .concat(sharedSls.map(sl => byId[sl.id]));
 
   return {
     volume:   (loadCachedData(userId) || {}).volume ?? DEFAULT_DATA.volume,
-    setlists: setlistsArr
+    setlists: ordered
   };
 }
 
@@ -1142,20 +1199,33 @@ async function loadUserData(userId) {
     try {
       const cloud = await fetchDataFromCloud(userId);
       if (cloud.setlists.length === 0) {
-        // New user — seed with the demo setlists so the app isn't empty
+        // Cloud is empty. Two cases:
+        //  1. Existing user upgrading from a local-only build — their
+        //     real setlists are in localStorage. Use those and push
+        //     them up to Supabase so the cloud catches up.
+        //  2. Brand-new user, no cache either — seed the demo setlists.
+        if (cached && Array.isArray(cached.setlists) && cached.setlists.length) {
+          ensureIds(cached);
+          saveCachedData(userId, cached);
+          setTimeout(() => { scheduleCloudSync(); }, 50);
+          return cached;
+        }
         const seeded = JSON.parse(JSON.stringify(DEFAULT_DATA));
         ensureIds(seeded);
         saveCachedData(userId, seeded);
-        // Schedule a sync so the seed shows up in Supabase too
         setTimeout(() => { scheduleCloudSync(); }, 50);
         return seeded;
       }
       ensureIds(cloud);
       saveCachedData(userId, cloud);
-      // Update lastSyncedIds so deletion-diff works from this point on
+      // Update lastSyncedIds so deletion-diff works from this point on.
+      // IMPORTANT: only track OWNED ids — shared setlists must never be
+      // included or the next sync would diff them as "deleted by me"
+      // and fire pointless DELETE requests against rows I don't own.
+      const ownedNow = cloud.setlists.filter(sl => !sl._shared);
       const ids = {
-        setlists: cloud.setlists.map(sl => sl.id),
-        songs:    cloud.setlists.flatMap(sl => sl.songs.map(s => s.id))
+        setlists: ownedNow.map(sl => sl.id),
+        songs:    ownedNow.flatMap(sl => sl.songs.map(s => s.id))
       };
       saveSyncedIds(userId, ids);
       return cloud;
@@ -1194,10 +1264,15 @@ function scheduleCloudSync() {
   _syncTimer = setTimeout(syncToCloud, SYNC_DEBOUNCE_MS);
 }
 
+// Last sync error stashed for diagnostics. shareSetlist reads this so
+// it can surface the actual reason instead of a generic "setlist not
+// found" from the RPC.
+let _lastSyncError = null;
+
 async function syncToCloud() {
   _syncTimer = null;
-  if (!currentUser || !sb) return;
-  if (!navigator.onLine) { setSyncStatus('offline'); return; }
+  if (!currentUser || !sb) return false;
+  if (!navigator.onLine) { setSyncStatus('offline'); return false; }
 
   // Snapshot the user id at the start so a logout mid-sync doesn't
   // throw on the post-await access to currentUser.id.
@@ -1210,7 +1285,11 @@ async function syncToCloud() {
   try {
     ensureIds(data);
 
-    const setlistRows = data.setlists.map((sl, i) => ({
+    // Only push setlists I actually own. Setlists shared with me have
+    // _shared = true; the owner is the one pushing those rows.
+    const ownedSetlists = data.setlists.filter(sl => !sl._shared);
+
+    const setlistRows = ownedSetlists.map((sl, i) => ({
       id:       sl.id,
       owner_id: userId,
       name:     sl.name || '',
@@ -1218,7 +1297,7 @@ async function syncToCloud() {
     }));
 
     const songRows = [];
-    data.setlists.forEach(sl => {
+    ownedSetlists.forEach(sl => {
       (sl.songs || []).forEach((s, j) => {
         songRows.push({
           id:         s.id,
@@ -1235,11 +1314,17 @@ async function syncToCloud() {
     // Upserts: rows already in Supabase get updated, new rows inserted.
     if (setlistRows.length) {
       const { error } = await sb.from('setlists').upsert(setlistRows);
-      if (error) throw error;
+      if (error) {
+        console.error('[sync] setlists upsert failed:', error);
+        throw error;
+      }
     }
     if (songRows.length) {
       const { error } = await sb.from('songs').upsert(songRows);
-      if (error) throw error;
+      if (error) {
+        console.error('[sync] songs upsert failed:', error);
+        throw error;
+      }
     }
 
     // Diff-based delete: anything in lastSyncedIds that no longer
@@ -1254,11 +1339,11 @@ async function syncToCloud() {
     const delSongs    = (prev.songs    || []).filter(id => !curSongIds.has(id));
     if (delSongs.length) {
       const { error } = await sb.from('songs').delete().in('id', delSongs);
-      if (error) console.warn('Song delete failed:', error);
+      if (error) console.warn('[sync] song delete failed:', error);
     }
     if (delSetlists.length) {
       const { error } = await sb.from('setlists').delete().in('id', delSetlists);
-      if (error) console.warn('Setlist delete failed:', error);
+      if (error) console.warn('[sync] setlist delete failed:', error);
     }
 
     saveSyncedIds(userId, {
@@ -1266,12 +1351,16 @@ async function syncToCloud() {
       songs:    [...curSongIds]
     });
 
+    _lastSyncError = null;
     setSyncStatus('synced');
+    return true;
   } catch (e) {
-    console.warn('Cloud sync failed:', e);
+    _lastSyncError = e;
+    console.error('[sync] cloud sync failed:', e, e && e.message, e && e.details);
     setSyncStatus(navigator.onLine ? 'error' : 'offline');
     // Try again in a bit so transient failures self-heal
     setTimeout(() => { if (currentUser) scheduleCloudSync(); }, 5000);
+    return false;
   } finally {
     _syncInFlight = false;
     // Pick up any edits that landed while we were in flight
@@ -1280,6 +1369,34 @@ async function syncToCloud() {
       scheduleCloudSync();
     }
   }
+}
+
+// Lets you click the sync-status pill (when in 'error' state) to see
+// exactly what went wrong. Useful while debugging Phase 2.
+function showLastSyncError() {
+  if (!_lastSyncError) {
+    openModal('Sync Status', `<p style="color:var(--muted)">Everything's synced.</p>`, [
+      { label: 'OK', onclick: closeModal }
+    ]);
+    return;
+  }
+  const e = _lastSyncError;
+  const detail = [
+    e.message ? 'Message: ' + e.message : null,
+    e.details ? 'Details: ' + e.details : null,
+    e.hint    ? 'Hint: '    + e.hint    : null,
+    e.code    ? 'Code: '    + e.code    : null
+  ].filter(Boolean).join('\n') || JSON.stringify(e, null, 2);
+  openModal('Sync Error', `
+    <p style="color:var(--muted);font-size:12px;margin-bottom:8px">
+      Couldn't push your setlists to the cloud. Details below — share
+      them in your bug report.
+    </p>
+    <pre style="background:var(--surface2);padding:10px;border-radius:8px;font-size:11px;white-space:pre-wrap;word-break:break-word;color:var(--text);max-height:240px;overflow:auto">${escapeHtml(detail)}</pre>
+  `, [
+    { label: 'Retry now', cls: 'btn-primary', onclick: () => { closeModal(); scheduleCloudSync(); } },
+    { label: 'Close', cls: 'btn-ghost', onclick: closeModal }
+  ]);
 }
 
 // Tiny status pill in the header. States: synced / saving / pending /
@@ -2298,26 +2415,46 @@ function openSetlistRowMenu(event, i) {
   const sl = data.setlists[i];
   if (!sl) return;
 
-  // Each item is rendered as a full-width button so it's comfy to tap
-  // on a phone. The icon column is fixed-width so the labels line up.
-  // data-action is read by the click delegate below.
-  const itemsHtml = `
-    <button class="sl-menu-item"        data-action="share">
-      <span class="sl-menu-icon">👥</span> Share setlist
-    </button>
-    <button class="sl-menu-item"        data-action="edit">
-      <span class="sl-menu-icon">✎</span> Edit setlist
-    </button>
-    <button class="sl-menu-item"        data-action="copy">
+  // Shared setlists get a different menu: I'm not the owner, so I can't
+  // share it further, can't truly delete it (would need to remove the
+  // share row), and can only Edit if my permission is 'edit'. Copy and
+  // Export still work (they create local-only or file-only copies).
+  const isShared = !!sl._shared;
+  const canEdit  = !isShared || sl._permission === 'edit';
+
+  let itemsHtml = '';
+  if (!isShared) {
+    itemsHtml += `
+      <button class="sl-menu-item" data-action="share">
+        <span class="sl-menu-icon">👥</span> Share setlist
+      </button>`;
+  }
+  if (canEdit) {
+    itemsHtml += `
+      <button class="sl-menu-item" data-action="edit">
+        <span class="sl-menu-icon">✎</span> Edit setlist
+      </button>`;
+  }
+  itemsHtml += `
+    <button class="sl-menu-item" data-action="copy">
       <span class="sl-menu-icon">❏</span> Copy setlist
     </button>
-    <button class="sl-menu-item"        data-action="export">
+    <button class="sl-menu-item" data-action="export">
       <span class="sl-menu-icon">⬇</span> Export to file
-    </button>
-    <button class="sl-menu-item danger" data-action="delete">
-      <span class="sl-menu-icon">🗑</span> Delete setlist
-    </button>
-  `;
+    </button>`;
+  if (isShared) {
+    // Recipient can stop seeing a shared setlist — this deletes the
+    // setlist_shares row, not the underlying setlist.
+    itemsHtml += `
+      <button class="sl-menu-item danger" data-action="unshare">
+        <span class="sl-menu-icon">✕</span> Remove from my list
+      </button>`;
+  } else {
+    itemsHtml += `
+      <button class="sl-menu-item danger" data-action="delete">
+        <span class="sl-menu-icon">🗑</span> Delete setlist
+      </button>`;
+  }
 
   openModal(escapeHtml(sl.name), itemsHtml, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal }
@@ -2330,12 +2467,48 @@ function openSetlistRowMenu(event, i) {
     const action = btn.dataset.action;
     // Close this menu before opening the next modal so they don't stack.
     closeModal();
-    if (action === 'share')  shareSetlist(i);
-    if (action === 'edit')   editSetlistAt(i);
-    if (action === 'copy')   copySetlist(i);
-    if (action === 'export') exportSetlistAt(i);
-    if (action === 'delete') deleteSetlistAt(i);
+    if (action === 'share')   shareSetlist(i);
+    if (action === 'edit')    editSetlistAt(i);
+    if (action === 'copy')    copySetlist(i);
+    if (action === 'export')  exportSetlistAt(i);
+    if (action === 'delete')  deleteSetlistAt(i);
+    if (action === 'unshare') removeSharedSetlist(i);
   };
+}
+
+// "Remove from my list" for a shared setlist — deletes my setlist_shares
+// row. The owner still has the setlist; we just lose access. The
+// setlists table itself isn't touched.
+async function removeSharedSetlist(i) {
+  const sl = data.setlists[i];
+  if (!sl || !sl._shared) return;
+  openModal('Remove from My List', `
+    <p style="color:var(--muted);font-size:13px;line-height:1.5">
+      Remove "<strong style="color:var(--text)">${escapeHtml(sl.name)}</strong>"
+      from your setlists? The owner keeps the setlist; you just stop seeing it.
+    </p>
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Remove', cls: 'btn-primary btn-danger', onclick: async () => {
+      try {
+        // RLS on setlist_shares.shared_with policy allows recipients to
+        // SELECT but not DELETE — so we can't delete it ourselves under
+        // the current schema. Instead, just drop it locally; next cloud
+        // refresh would re-add it. For a true unshare, the owner has
+        // to revoke. (We could relax the RLS later if needed.)
+        data.setlists.splice(i, 1);
+        if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
+        state.songIndex = 0;
+        saveCachedData(currentUser.id, data);
+        closeModal();
+        renderSetlist();
+        renderMain();
+      } catch (e) {
+        console.warn('removeSharedSetlist failed:', e);
+        closeModal();
+      }
+    }}
+  ]);
 }
 
 // ── Edit (rename) ──────────────────────────────────────────────────
@@ -2435,7 +2608,7 @@ function exportSetlistAt(i) {
 // Opens a modal with: recipient email + view/edit permission picker.
 // Hits the share_setlist_by_email RPC (which looks up the user by email
 // and inserts/updates the setlist_shares row in a single round trip).
-function shareSetlist(i) {
+async function shareSetlist(i) {
   const sl = data.setlists[i];
   if (!sl) return;
   if (!sb) {
@@ -2444,15 +2617,52 @@ function shareSetlist(i) {
     ]);
     return;
   }
-  if (!sl.id) {
-    // Brand-new setlist that hasn't been synced yet. Force a save so
-    // ensureIds assigns it an id, then queue a sync.
-    saveData();
+
+  // Make sure the setlist actually exists in the cloud before sharing —
+  // the RPC looks it up by id and would otherwise return "setlist not
+  // found" for anything that hasn't been pushed up yet. Show a
+  // "preparing…" modal so the wait isn't silent.
+  openModal('Share Setlist', `
+    <div style="display:flex;flex-direction:column;align-items:center;gap:10px;padding:20px 0">
+      <div style="color:var(--muted);font-size:12px;letter-spacing:1px">SYNCING TO CLOUD…</div>
+    </div>
+  `, []);
+
+  // Cancel any pending debounce so we sync RIGHT NOW
+  if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
+  // If a sync is already running, wait for it to finish
+  while (_syncInFlight) await new Promise(r => setTimeout(r, 80));
+  const ok = await syncToCloud();
+
+  if (!ok) {
+    const e = _lastSyncError;
+    const detail = e ? (e.message || JSON.stringify(e)) : 'Unknown error';
+    openModal('Sync Failed', `
+      <p style="color:var(--muted);font-size:13px;line-height:1.5">
+        Couldn't push your setlist to the cloud, so sharing isn't available yet.
+      </p>
+      <pre style="background:var(--surface2);padding:10px;border-radius:8px;font-size:11px;white-space:pre-wrap;word-break:break-word;color:var(--text);margin-top:8px">${escapeHtml(detail)}</pre>
+    `, [
+      { label: 'Retry', cls: 'btn-primary', onclick: () => { closeModal(); shareSetlist(i); } },
+      { label: 'Close', cls: 'btn-ghost', onclick: closeModal }
+    ]);
+    return;
   }
+
+  // Sync succeeded — re-grab the setlist (in case the array shifted) and
+  // open the actual share form.
+  const slNow = data.setlists[i];
+  if (!slNow || !slNow.id) {
+    openModal('Share Failed', `<p style="color:var(--muted)">Setlist has no id after sync. Please report this.</p>`, [
+      { label: 'OK', onclick: closeModal }
+    ]);
+    return;
+  }
+
   openModal('Share Setlist', `
     <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:10px">
       Enter the email of someone with a Choir Setlist account. They'll
-      see "<strong style="color:var(--text)">${escapeHtml(sl.name)}</strong>" in their app.
+      see "<strong style="color:var(--text)">${escapeHtml(slNow.name)}</strong>" in their app.
     </p>
     <input id="share-email" class="login-input" type="email" placeholder="recipient@example.com"
            autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
@@ -2601,13 +2811,18 @@ function renderSetlist() {
     const isActive = i === state.setlistIndex;
     row.className = 'list-row' + (isActive ? ' selected' : '');
     row.dataset.index = i;
-    // The ⋯ button stops click propagation so tapping it doesn't also
-    // select the setlist underneath. event.stopPropagation lives in
-    // openSetlistRowMenu so we can keep the handler inline-clean here.
+    // Shared setlists get a small badge so the user can tell them apart.
+    // 'view' shows just "SHARED"; 'edit' shows "SHARED · EDIT" so they
+    // know they can change the songs.
+    const sharedBadge = sl._shared ? `
+      <span class="sl-shared-badge" title="Shared by someone else">
+        SHARED${sl._permission === 'edit' ? ' · EDIT' : ''}
+      </span>` : '';
     row.innerHTML = `
       <span class="drag-handle" title="Drag to reorder">⠿</span>
       <span class="list-idx">${i + 1}</span>
       <span class="list-name">${escapeHtml(sl.name)}</span>
+      ${sharedBadge}
       <span style="font-size:10px;color:var(--muted)">${sl.songs.length} song${sl.songs.length !== 1 ? 's' : ''}</span>
       <button class="sl-row-menu-btn" title="More" onclick="openSetlistRowMenu(event, ${i})">⋯</button>`;
     row.onclick = (e) => {

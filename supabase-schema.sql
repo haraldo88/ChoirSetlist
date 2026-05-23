@@ -120,6 +120,57 @@ alter table public.setlists       enable row level security;
 alter table public.songs          enable row level security;
 alter table public.setlist_shares enable row level security;
 
+-- ── SECURITY-DEFINER ACCESS HELPERS ────────────────────────────────────
+-- These tiny yes/no functions answer "does the current user own / view /
+-- edit this setlist?" without re-triggering RLS. They're essential — if
+-- the cross-table policies below were written as plain EXISTS subqueries
+-- against setlists / setlist_shares, evaluating either table would
+-- trigger the other table's policy and Postgres would error out with
+-- "infinite recursion detected in policy for relation 'setlists'".
+--
+-- SECURITY DEFINER means the function runs as its owner (schema owner),
+-- which bypasses RLS for the SELECT inside the function body — exactly
+-- what we need to break the recursion cycle.
+
+create or replace function public.user_owns_setlist(p_setlist_id uuid)
+returns boolean
+language sql security definer stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.setlists sl
+    where sl.id = p_setlist_id and sl.owner_id = auth.uid()
+  );
+$$;
+
+create or replace function public.user_can_view_setlist(p_setlist_id uuid)
+returns boolean
+language sql security definer stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.setlist_shares s
+    where s.setlist_id = p_setlist_id and s.shared_with = auth.uid()
+  );
+$$;
+
+create or replace function public.user_can_edit_setlist(p_setlist_id uuid)
+returns boolean
+language sql security definer stable
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.setlist_shares s
+    where s.setlist_id = p_setlist_id
+      and s.shared_with = auth.uid()
+      and s.permission   = 'edit'
+  );
+$$;
+
+grant execute on function public.user_owns_setlist(uuid)     to authenticated;
+grant execute on function public.user_can_view_setlist(uuid) to authenticated;
+grant execute on function public.user_can_edit_setlist(uuid) to authenticated;
+
 -- profiles: each user manages their own row. Other users cannot read it
 -- directly — share lookups go through the security-definer RPC below
 -- so we don't expose the email column to enumeration.
@@ -146,82 +197,45 @@ create policy setlists_owner_all on public.setlists
   for all using (auth.uid() = owner_id) with check (auth.uid() = owner_id);
 
 create policy setlists_shared_select on public.setlists
-  for select using (
-    exists (
-      select 1 from public.setlist_shares s
-      where s.setlist_id = id and s.shared_with = auth.uid()
-    )
-  );
+  for select using (public.user_can_view_setlist(id));
 
 create policy setlists_shared_update on public.setlists
-  for update using (
-    exists (
-      select 1 from public.setlist_shares s
-      where s.setlist_id = id and s.shared_with = auth.uid() and s.permission = 'edit'
-    )
-  );
+  for update using (public.user_can_edit_setlist(id));
 
 -- songs: same model, but reached indirectly through the parent setlist.
+-- All cross-table checks go through the helper functions to keep RLS
+-- from recursing.
 
-drop policy if exists songs_owner_all on public.songs;
+drop policy if exists songs_owner_all     on public.songs;
 drop policy if exists songs_shared_select on public.songs;
 drop policy if exists songs_shared_mutate on public.songs;
 
 create policy songs_owner_all on public.songs
-  for all using (
-    exists (
-      select 1 from public.setlists sl
-      where sl.id = setlist_id and sl.owner_id = auth.uid()
-    )
-  )
-  with check (
-    exists (
-      select 1 from public.setlists sl
-      where sl.id = setlist_id and sl.owner_id = auth.uid()
-    )
-  );
+  for all
+  using      (public.user_owns_setlist(setlist_id))
+  with check (public.user_owns_setlist(setlist_id));
 
 create policy songs_shared_select on public.songs
-  for select using (
-    exists (
-      select 1 from public.setlist_shares s
-      where s.setlist_id = songs.setlist_id and s.shared_with = auth.uid()
-    )
-  );
+  for select
+  using (public.user_can_view_setlist(setlist_id));
 
 create policy songs_shared_mutate on public.songs
-  for all using (
-    exists (
-      select 1 from public.setlist_shares s
-      where s.setlist_id = songs.setlist_id and s.shared_with = auth.uid() and s.permission = 'edit'
-    )
-  )
-  with check (
-    exists (
-      select 1 from public.setlist_shares s
-      where s.setlist_id = songs.setlist_id and s.shared_with = auth.uid() and s.permission = 'edit'
-    )
-  );
+  for all
+  using      (public.user_can_edit_setlist(setlist_id))
+  with check (public.user_can_edit_setlist(setlist_id));
 
 -- setlist_shares: the setlist owner can fully manage shares; recipients
--- can see (but not modify) the shares that grant them access.
+-- can see (but not modify) the shares that grant them access. The
+-- owner-check goes through the helper function to avoid recursing into
+-- the setlists policies.
 
-drop policy if exists shares_owner_all on public.setlist_shares;
+drop policy if exists shares_owner_all        on public.setlist_shares;
 drop policy if exists shares_recipient_select on public.setlist_shares;
 
 create policy shares_owner_all on public.setlist_shares
-  for all using (
-    exists (
-      select 1 from public.setlists sl
-      where sl.id = setlist_id and sl.owner_id = auth.uid()
-    )
-  )
-  with check (
-    exists (
-      select 1 from public.setlists sl
-      where sl.id = setlist_id and sl.owner_id = auth.uid()
-    )
-  );
+  for all
+  using      (public.user_owns_setlist(setlist_id))
+  with check (public.user_owns_setlist(setlist_id));
 
 create policy shares_recipient_select on public.setlist_shares
   for select using (shared_with = auth.uid());
