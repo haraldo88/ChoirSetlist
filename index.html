@@ -2696,6 +2696,36 @@ async function shareSetlist(i) {
           statusEl.textContent = res.error || 'Could not share.';
           return;
         }
+
+        // res.invited === true means the recipient doesn't have an
+        // account yet. The pending invite was already recorded; we now
+        // ask Supabase to send them a magic-link signup email. Once
+        // they click it and create an account, the handle_new_user
+        // trigger promotes the pending invite into a real share.
+        if (res && res.invited === true) {
+          statusEl.style.color = 'var(--muted)';
+          statusEl.textContent = 'Sending invite email…';
+          const { error: otpErr } = await sb.auth.signInWithOtp({
+            email,
+            options: {
+              shouldCreateUser: true,
+              emailRedirectTo: location.origin + location.pathname
+            }
+          });
+          if (otpErr) {
+            // The pending invite is stored regardless. Tell the user
+            // what happened — they can also share with the same email
+            // later once Supabase's rate limit window clears.
+            statusEl.style.color = '#d9a44b';
+            statusEl.textContent = 'Invite saved, but email failed: ' + otpErr.message;
+            return;
+          }
+          statusEl.style.color = 'var(--accent)';
+          statusEl.textContent = 'Invite emailed to ' + email + '. They\'ll see the setlist after signing up.';
+          setTimeout(closeModal, 2200);
+          return;
+        }
+
         statusEl.style.color = 'var(--accent)';
         statusEl.textContent = 'Shared with ' + email + '.';
         setTimeout(closeModal, 1200);
