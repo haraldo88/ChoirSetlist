@@ -1219,13 +1219,17 @@ async function loadUserData(userId) {
       ensureIds(cloud);
       saveCachedData(userId, cloud);
       // Update lastSyncedIds so deletion-diff works from this point on.
-      // IMPORTANT: only track OWNED ids — shared setlists must never be
-      // included or the next sync would diff them as "deleted by me"
-      // and fire pointless DELETE requests against rows I don't own.
-      const ownedNow = cloud.setlists.filter(sl => !sl._shared);
+      //   setlists  — owned only. We never want a future sync to diff
+      //               a shared setlist as "removed" and fire a delete
+      //               request against a row we don't own.
+      //   songs     — owned + shared-edit. We DO want to detect when
+      //               an editor deletes a song from a shared-edit
+      //               setlist so the delete propagates to the cloud.
+      const ownedNow      = cloud.setlists.filter(sl => !sl._shared);
+      const sharedEditNow = cloud.setlists.filter(sl => sl._shared && sl._permission === 'edit');
       const ids = {
         setlists: ownedNow.map(sl => sl.id),
-        songs:    ownedNow.flatMap(sl => sl.songs.map(s => s.id))
+        songs:    ownedNow.concat(sharedEditNow).flatMap(sl => sl.songs.map(s => s.id))
       };
       saveSyncedIds(userId, ids);
       return cloud;
@@ -1285,19 +1289,35 @@ async function syncToCloud() {
   try {
     ensureIds(data);
 
-    // Only push setlists I actually own. Setlists shared with me have
-    // _shared = true; the owner is the one pushing those rows.
-    const ownedSetlists = data.setlists.filter(sl => !sl._shared);
+    // ── Buckets ────────────────────────────────────────────────────
+    //   owned        — setlists I own; full read/write
+    //   sharedEdit   — setlists shared WITH me at 'edit' permission;
+    //                  I can change their name + their songs, but
+    //                  NOT owner_id or position
+    //   sharedView   — read-only; never sync any of this
+    const owned      = data.setlists.filter(sl => !sl._shared);
+    const sharedEdit = data.setlists.filter(sl => sl._shared && sl._permission === 'edit');
 
-    const setlistRows = ownedSetlists.map((sl, i) => ({
+    // ── Setlist rows ───────────────────────────────────────────────
+    // Owned: full payload (id, owner_id=me, name, position).
+    // Shared-edit: only id + name. Omitting owner_id and position
+    // means the existing values are preserved on the UPDATE side of
+    // the upsert — we deliberately don't want to overwrite the
+    // owner's position with our local index.
+    const ownedSetlistRows = owned.map((sl, i) => ({
       id:       sl.id,
       owner_id: userId,
       name:     sl.name || '',
       position: i
     }));
+    const sharedEditSetlistRows = sharedEdit.map(sl => ({
+      id:   sl.id,
+      name: sl.name || ''
+    }));
 
+    // ── Song rows (owned + shared-edit, full payload) ─────────────
     const songRows = [];
-    ownedSetlists.forEach(sl => {
+    owned.concat(sharedEdit).forEach(sl => {
       (sl.songs || []).forEach((s, j) => {
         songRows.push({
           id:         s.id,
@@ -1311,31 +1331,36 @@ async function syncToCloud() {
       });
     });
 
-    // Upserts: rows already in Supabase get updated, new rows inserted.
-    if (setlistRows.length) {
-      const { error } = await sb.from('setlists').upsert(setlistRows);
-      if (error) {
-        console.error('[sync] setlists upsert failed:', error);
-        throw error;
-      }
+    // ── Upserts ───────────────────────────────────────────────────
+    // Two separate setlist upserts because the shared-edit payload has
+    // a different column set.
+    if (ownedSetlistRows.length) {
+      const { error } = await sb.from('setlists').upsert(ownedSetlistRows);
+      if (error) { console.error('[sync] owned setlists upsert failed:', error); throw error; }
+    }
+    if (sharedEditSetlistRows.length) {
+      const { error } = await sb.from('setlists').upsert(sharedEditSetlistRows);
+      if (error) { console.error('[sync] shared-edit setlists upsert failed:', error); throw error; }
     }
     if (songRows.length) {
       const { error } = await sb.from('songs').upsert(songRows);
-      if (error) {
-        console.error('[sync] songs upsert failed:', error);
-        throw error;
-      }
+      if (error) { console.error('[sync] songs upsert failed:', error); throw error; }
     }
 
-    // Diff-based delete: anything in lastSyncedIds that no longer
-    // exists locally was removed by the user and needs to be deleted
-    // from Supabase too. ON DELETE CASCADE on songs.setlist_id means
-    // deleting a setlist takes its songs with it, but we delete songs
-    // explicitly anyway so the diff stays correct.
+    // ── Diff-based delete ─────────────────────────────────────────
+    //   Setlists: only delete OWNED ones that vanished locally. We
+    //   never delete shared setlists from the cloud — that's the
+    //   owner's call. "Remove from my list" is a recipient-side
+    //   action that doesn't touch the setlist itself.
+    //
+    //   Songs: delete any tracked song that's no longer present
+    //   locally — whether it belonged to an owned setlist or a
+    //   shared-edit one. The RLS policies (songs_owner_all /
+    //   songs_shared_mutate) gate which deletes actually succeed.
     const prev = loadSyncedIds(userId);
-    const curSetlistIds = new Set(setlistRows.map(r => r.id));
-    const curSongIds    = new Set(songRows.map(r => r.id));
-    const delSetlists = (prev.setlists || []).filter(id => !curSetlistIds.has(id));
+    const curOwnedSetlistIds = new Set(ownedSetlistRows.map(r => r.id));
+    const curSongIds         = new Set(songRows.map(r => r.id));
+    const delSetlists = (prev.setlists || []).filter(id => !curOwnedSetlistIds.has(id));
     const delSongs    = (prev.songs    || []).filter(id => !curSongIds.has(id));
     if (delSongs.length) {
       const { error } = await sb.from('songs').delete().in('id', delSongs);
@@ -1346,8 +1371,11 @@ async function syncToCloud() {
       if (error) console.warn('[sync] setlist delete failed:', error);
     }
 
+    // Save the new lastSyncedIds: owned setlist IDs only (so future
+    // diffs never try to delete a shared setlist) and the full song
+    // set we just pushed (owned + shared-edit).
     saveSyncedIds(userId, {
-      setlists: [...curSetlistIds],
+      setlists: [...curOwnedSetlistIds],
       songs:    [...curSongIds]
     });
 
@@ -1544,6 +1572,14 @@ function currentSetlist() { return data.setlists[state.setlistIndex]; }
 function currentSong() {
   const sl = currentSetlist();
   return sl && sl.songs[state.songIndex];
+}
+
+// True when the current setlist was shared with me view-only — I can
+// browse it but writes won't persist (RLS blocks them on the cloud
+// side and the next refresh would clobber any local changes).
+function isCurrentSetlistReadOnly() {
+  const sl = currentSetlist();
+  return !!(sl && sl._shared && sl._permission !== 'edit');
 }
 
 // ═══════════════════════════ SCREEN NAV ═══════════════════════════
@@ -1803,9 +1839,23 @@ function renderMain() {
 
   const sl = currentSetlist();
   const song = currentSong();
+  const readOnly = isCurrentSetlistReadOnly();
 
-  document.getElementById('main-setlist-name').textContent = sl ? sl.name : '—';
+  // Title shows a "VIEW ONLY" suffix for shared-view setlists so the
+  // user understands why edit affordances are hidden.
+  const titleEl = document.getElementById('main-setlist-name');
+  titleEl.textContent = sl ? sl.name : '—';
+  if (sl && readOnly) {
+    titleEl.innerHTML = escapeHtml(sl.name) +
+      ' <span style="font-size:9px;letter-spacing:1px;color:var(--accent);background:rgba(107,205,253,0.12);padding:2px 5px;border-radius:4px;margin-left:6px;vertical-align:middle">VIEW ONLY</span>';
+  }
   document.getElementById('main-bpm').textContent = song ? song.tempo : '—';
+
+  // Hide the inline Add Song (+) button on the main screen's songlist
+  // card when the current setlist is shared view-only — RLS would
+  // block the insert anyway.
+  document.querySelectorAll('.songlist-btns button[onclick="addSong()"]')
+    .forEach(btn => { btn.style.display = readOnly ? 'none' : ''; });
 
   // Songs list
   const list = document.getElementById('main-songs-list');
@@ -2330,8 +2380,15 @@ function savePianoAndBack() {
 function renderSonglist() {
   const sl = currentSetlist();
   const filter = (document.getElementById('song-search')?.value || '').toLowerCase();
+  const readOnly = isCurrentSetlistReadOnly();
 
-  document.getElementById('songlist-title').textContent = sl ? sl.name : '—';
+  // Title gets the same VIEW ONLY badge treatment as the main screen.
+  const titleEl = document.getElementById('songlist-title');
+  titleEl.textContent = sl ? sl.name : '—';
+  if (sl && readOnly) {
+    titleEl.innerHTML = escapeHtml(sl.name) +
+      ' <span style="font-size:9px;letter-spacing:1px;color:var(--accent);background:rgba(107,205,253,0.12);padding:2px 5px;border-radius:4px;margin-left:6px;vertical-align:middle">VIEW ONLY</span>';
+  }
 
   const list = document.getElementById('full-songs-list');
   list.innerHTML = '';
@@ -2342,12 +2399,15 @@ function renderSonglist() {
     const row = document.createElement('div');
     row.className = 'list-row' + (i === state.songIndex ? ' selected' : '');
     row.dataset.index = i;
+    // Drag handle and delete button are hidden for read-only setlists.
+    const dragHandle  = readOnly ? '' : `<span class="drag-handle" title="Drag to reorder">⠿</span>`;
+    const deleteBtn   = readOnly ? '' : `<button class="btn-icon" style="width:28px;height:28px;font-size:11px" onclick="event.stopPropagation();deleteSong(${i})">✕</button>`;
     row.innerHTML = `
-      <span class="drag-handle" title="Drag to reorder">⠿</span>
+      ${dragHandle}
       <span class="list-idx">${i + 1}</span>
       <span class="list-name">${escapeHtml(song.name || '(unnamed)')}</span>
       <span style="font-size:10px;color:var(--muted)">${escapeHtml(song.time)} · ${escapeHtml(song.tempo)}bpm</span>
-      <button class="btn-icon" style="width:28px;height:28px;font-size:11px" onclick="event.stopPropagation();deleteSong(${i})">✕</button>`;
+      ${deleteBtn}`;
     row.onclick = (e) => {
       if (e.target.classList.contains('drag-handle') || e.target.closest('.btn-icon')) return;
       state.songIndex = i; renderSonglist(); showScreen('screen-main');
@@ -2355,22 +2415,30 @@ function renderSonglist() {
     list.appendChild(row);
   });
 
-  setupDragReorder(list, (fromIdx, toIdx) => {
-    const sl2 = currentSetlist();
-    if (!sl2) return;
-    const moved = sl2.songs.splice(fromIdx, 1)[0];
-    sl2.songs.splice(toIdx, 0, moved);
-    if (state.songIndex === fromIdx) state.songIndex = toIdx;
-    else if (state.songIndex > fromIdx && state.songIndex <= toIdx) state.songIndex--;
-    else if (state.songIndex < fromIdx && state.songIndex >= toIdx) state.songIndex++;
-    saveData();
-    renderSonglist();
-  });
+  // Skip drag-reorder wiring entirely for read-only setlists — no
+  // sense letting the user feel like they reordered something only
+  // to have it snap back on refresh.
+  if (!readOnly) {
+    setupDragReorder(list, (fromIdx, toIdx) => {
+      const sl2 = currentSetlist();
+      if (!sl2) return;
+      const moved = sl2.songs.splice(fromIdx, 1)[0];
+      sl2.songs.splice(toIdx, 0, moved);
+      if (state.songIndex === fromIdx) state.songIndex = toIdx;
+      else if (state.songIndex > fromIdx && state.songIndex <= toIdx) state.songIndex--;
+      else if (state.songIndex < fromIdx && state.songIndex >= toIdx) state.songIndex++;
+      saveData();
+      renderSonglist();
+    });
+  }
 }
 
 function addSong() {
   const sl = currentSetlist();
   if (!sl) return showModal('No Setlist', '<p style="color:var(--muted)">Please create a setlist first.</p>', [{ label: 'OK', onclick: closeModal }]);
+  if (isCurrentSetlistReadOnly()) {
+    return openModal('View Only', '<p style="color:var(--muted)">This setlist was shared with you in view-only mode. Use the ⋯ menu → Copy to make your own editable copy.</p>', [{ label: 'OK', onclick: closeModal }]);
+  }
   openModal('New Song', `<input type="text" id="new-song-name" placeholder="Song name…"><input type="number" id="new-song-tempo" placeholder="Tempo (BPM)" value="120" min="20" max="300">`, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Add', cls: 'btn-primary', onclick: () => {
@@ -2390,6 +2458,7 @@ function addSong() {
 function deleteSong(i) {
   const sl = currentSetlist();
   if (!sl) return;
+  if (isCurrentSetlistReadOnly()) return; // belt-and-braces; UI hides the button
   openModal('Delete Song', `<p style="color:var(--muted)">Delete "${escapeHtml(sl.songs[i].name)}"?</p>`, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Delete', cls: 'btn-primary btn-danger', onclick: () => {

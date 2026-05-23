@@ -102,6 +102,28 @@ create trigger songs_updated_at
   before update on public.songs
   for each row execute function public.set_updated_at();
 
+-- ── DEFENSE: NON-OWNER CAN'T REWRITE owner_id ──────────────────────────
+-- The setlists_shared_update RLS policy lets an "edit" collaborator
+-- update a setlist they don't own. Without this trigger, that policy
+-- doesn't prevent them from setting owner_id to themselves and stealing
+-- the setlist. This pins owner_id to whoever currently owns the row.
+
+create or replace function public.prevent_setlist_owner_change()
+returns trigger language plpgsql as $$
+begin
+  if new.owner_id is distinct from old.owner_id
+     and old.owner_id <> auth.uid() then
+    raise exception 'only the owner can change owner_id';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists prevent_setlist_owner_change on public.setlists;
+create trigger prevent_setlist_owner_change
+  before update on public.setlists
+  for each row execute function public.prevent_setlist_owner_change();
+
 -- ── AUTO-CREATE PROFILE ON SIGNUP + PROMOTE PENDING INVITES ────────────
 -- When a user signs up via Supabase Auth we do two things:
 --   1. Mirror them into public.profiles (so the app can look them up).

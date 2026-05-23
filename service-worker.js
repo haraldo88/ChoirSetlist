@@ -6,7 +6,7 @@
 
 // Bump CACHE_VERSION whenever index.html, the sample set, or the
 // icons change so old caches get evicted on activate.
-const CACHE_VERSION = 'v9';
+const CACHE_VERSION = 'v10';
 const CACHE_NAME = 'choir-setlist-' + CACHE_VERSION;
 
 // Notes kept in sync with PIANO_NOTES in index.html.
