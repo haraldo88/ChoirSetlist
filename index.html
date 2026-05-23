@@ -1299,20 +1299,21 @@ async function syncToCloud() {
     const sharedEdit = data.setlists.filter(sl => sl._shared && sl._permission === 'edit');
 
     // ── Setlist rows ───────────────────────────────────────────────
-    // Owned: full payload (id, owner_id=me, name, position).
-    // Shared-edit: only id + name. Omitting owner_id and position
-    // means the existing values are preserved on the UPDATE side of
-    // the upsert — we deliberately don't want to overwrite the
-    // owner's position with our local index.
+    // Owned: full payload (id, owner_id=me, name, position) — sent via
+    // upsert.
+    // Shared-edit: id + name only, sent via plain UPDATE (not upsert).
+    // Why not upsert? PostgREST compiles .upsert() to
+    //   INSERT ... ON CONFLICT DO UPDATE
+    // and PostgreSQL evaluates the INSERT path's WITH CHECK FIRST,
+    // regardless of whether the row exists. As a non-owner we'd fail
+    // setlists_owner_all (which requires auth.uid() = owner_id) and
+    // hit RLS error 42501. A plain UPDATE goes through
+    // setlists_shared_update instead, which is exactly what we want.
     const ownedSetlistRows = owned.map((sl, i) => ({
       id:       sl.id,
       owner_id: userId,
       name:     sl.name || '',
       position: i
-    }));
-    const sharedEditSetlistRows = sharedEdit.map(sl => ({
-      id:   sl.id,
-      name: sl.name || ''
     }));
 
     // ── Song rows (owned + shared-edit, full payload) ─────────────
@@ -1338,9 +1339,15 @@ async function syncToCloud() {
       const { error } = await sb.from('setlists').upsert(ownedSetlistRows);
       if (error) { console.error('[sync] owned setlists upsert failed:', error); throw error; }
     }
-    if (sharedEditSetlistRows.length) {
-      const { error } = await sb.from('setlists').upsert(sharedEditSetlistRows);
-      if (error) { console.error('[sync] shared-edit setlists upsert failed:', error); throw error; }
+    // Shared-edit setlists: one UPDATE per row (the row always already
+    // exists in the cloud — we loaded it from there). Plain UPDATE
+    // hits setlists_shared_update, sidestepping the INSERT-path RLS
+    // check that an .upsert() would trigger.
+    for (const sl of sharedEdit) {
+      const { error } = await sb.from('setlists')
+        .update({ name: sl.name || '' })
+        .eq('id', sl.id);
+      if (error) { console.error('[sync] shared-edit setlist update failed:', error); throw error; }
     }
     if (songRows.length) {
       const { error } = await sb.from('songs').upsert(songRows);
