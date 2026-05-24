@@ -384,13 +384,20 @@
     border-radius: 16px; padding: 24px; width: 90%; max-width: 360px;
   }
   .modal h3 { font-family: 'Playfair Display', serif; font-size: 20px; margin-bottom: 16px; }
-  .modal input, .modal select {
+  .modal input:not([type=radio]):not([type=checkbox]), .modal select {
     width: 100%; background: var(--surface2); border: 1px solid var(--border);
     color: var(--text); border-radius: 8px; padding: 12px 12px;
     font-family: 'DM Mono', monospace; font-size: 16px; outline: none;
     margin-bottom: 12px; -webkit-appearance: none;
   }
   .modal input:focus, .modal select:focus { border-color: var(--accent); }
+  /* Radios/checkboxes: keep native iOS styling so they're tappable.
+     The :not(...) selector above also strips them from the styled-input
+     rule, otherwise -webkit-appearance:none makes them invisible. */
+  .modal input[type=radio], .modal input[type=checkbox] {
+    width: 18px; height: 18px; margin: 0; flex: 0 0 auto;
+    accent-color: var(--accent); cursor: pointer;
+  }
   .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
 
   /* scrollable list area */
@@ -2737,8 +2744,9 @@ async function shareSetlist(i) {
 
   openModal('Share Setlist', `
     <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:10px">
-      Enter the email of someone with a Choir Setlist account. They'll
-      see "<strong style="color:var(--text)">${escapeHtml(slNow.name)}</strong>" in their app.
+      Enter the email of someone with a Choir Setlist account. If they
+      do not have an account, they will receive an email invitation to
+      join. They'll see "<strong style="color:var(--text)">${escapeHtml(slNow.name)}</strong>" in their app.
     </p>
     <input id="share-email" class="login-input" type="email" placeholder="recipient@example.com"
            autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
