@@ -2596,18 +2596,36 @@ async function viewSetlistAccess(i) {
         '<em>No one else has access yet. Use Share setlist to invite people.</em>';
       return;
     }
-    listEl.innerHTML = rows.map(r => {
-      const isPending = r.status === 'pending';
+
+    // Split into two groups so the user can see at a glance who has a
+    // Choir Setlist account and who's only been invited so far.
+    const active  = rows.filter(r => r.status === 'active');
+    const pending = rows.filter(r => r.status === 'pending');
+
+    const renderRow = (r) => {
       const permLabel = r.permission === 'edit' ? 'Can edit' : 'View only';
-      const pendingBadge = isPending
-        ? ' <span style="font-size:9px;letter-spacing:1px;color:#d9a44b;background:rgba(217,164,75,0.12);padding:2px 5px;border-radius:4px;margin-left:4px;vertical-align:middle">PENDING</span>'
-        : '';
       return `
         <div style="padding:10px 0;border-bottom:1px solid var(--border)">
-          <div style="color:var(--text);font-size:14px;word-break:break-all">${escapeHtml(r.email)}${pendingBadge}</div>
+          <div style="color:var(--text);font-size:14px;word-break:break-all">${escapeHtml(r.email)}</div>
           <div style="font-size:11px;color:var(--muted);margin-top:2px">${permLabel}</div>
         </div>`;
-    }).join('');
+    };
+
+    const sectionHeader = (label) => `
+      <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin:14px 0 4px;font-weight:600">
+        ${label}
+      </div>`;
+
+    let html = '';
+    if (active.length) {
+      html += sectionHeader('Has Choir Setlist account');
+      html += active.map(renderRow).join('');
+    }
+    if (pending.length) {
+      html += sectionHeader('Invited — not signed up yet');
+      html += pending.map(renderRow).join('');
+    }
+    listEl.innerHTML = html;
   } catch (e) {
     const listEl = document.getElementById('access-list');
     if (listEl) {
