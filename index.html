@@ -2510,6 +2510,9 @@ function openSetlistRowMenu(event, i) {
     itemsHtml += `
       <button class="sl-menu-item" data-action="share">
         <span class="sl-menu-icon">👥</span> Share setlist
+      </button>
+      <button class="sl-menu-item" data-action="access">
+        <span class="sl-menu-icon">🔑</span> People with access
       </button>`;
   }
   if (canEdit) {
@@ -2551,12 +2554,67 @@ function openSetlistRowMenu(event, i) {
     // Close this menu before opening the next modal so they don't stack.
     closeModal();
     if (action === 'share')   shareSetlist(i);
+    if (action === 'access')  viewSetlistAccess(i);
     if (action === 'edit')    editSetlistAt(i);
     if (action === 'copy')    copySetlist(i);
     if (action === 'export')  exportSetlistAt(i);
     if (action === 'delete')  deleteSetlistAt(i);
     if (action === 'unshare') removeSharedSetlist(i);
   };
+}
+
+// "People with access" — owner-only view that lists everyone who can
+// see this setlist. Pulls from two sources via the list_setlist_access
+// RPC: real shares (recipient already has an account) and pending
+// invites (we emailed them, they haven't signed up yet). The RPC is
+// SECURITY DEFINER so it can read auth.users.email; it also gates on
+// ownership server-side, so we don't need a client-side check beyond
+// what openSetlistRowMenu already does.
+async function viewSetlistAccess(i) {
+  const sl = data.setlists[i];
+  if (!sl || !sl.id) return;
+
+  openModal('People with Access', `
+    <p style="color:var(--muted);font-size:13px;line-height:1.5;margin-bottom:10px">
+      People with access to
+      "<strong style="color:var(--text)">${escapeHtml(sl.name)}</strong>":
+    </p>
+    <div id="access-list" style="color:var(--muted);font-size:13px">Loading…</div>
+  `, [
+    { label: 'Close', cls: 'btn-ghost', onclick: closeModal }
+  ]);
+
+  try {
+    const { data: rows, error } = await sb.rpc('list_setlist_access', {
+      p_setlist_id: sl.id
+    });
+    if (error) throw error;
+    const listEl = document.getElementById('access-list');
+    if (!listEl) return;
+    if (!rows || rows.length === 0) {
+      listEl.innerHTML =
+        '<em>No one else has access yet. Use Share setlist to invite people.</em>';
+      return;
+    }
+    listEl.innerHTML = rows.map(r => {
+      const isPending = r.status === 'pending';
+      const permLabel = r.permission === 'edit' ? 'Can edit' : 'View only';
+      const pendingBadge = isPending
+        ? ' <span style="font-size:9px;letter-spacing:1px;color:#d9a44b;background:rgba(217,164,75,0.12);padding:2px 5px;border-radius:4px;margin-left:4px;vertical-align:middle">PENDING</span>'
+        : '';
+      return `
+        <div style="padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="color:var(--text);font-size:14px;word-break:break-all">${escapeHtml(r.email)}${pendingBadge}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px">${permLabel}</div>
+        </div>`;
+    }).join('');
+  } catch (e) {
+    const listEl = document.getElementById('access-list');
+    if (listEl) {
+      listEl.style.color = '#ff6b6b';
+      listEl.textContent = (e && e.message) || 'Could not load access list.';
+    }
+  }
 }
 
 // "Remove from my list" for a shared setlist — deletes my setlist_shares
