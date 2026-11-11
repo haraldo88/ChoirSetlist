@@ -170,13 +170,23 @@
   .song-row.selected { color: var(--accent); font-weight: 500; }
   .song-num { color: var(--muted); width: 20px; flex-shrink: 0; font-size: 11px; }
   .song-name { flex: 1; }
-  .songs-scroll { max-height: 140px; overflow-y: auto; }
+  /* Main-screen songlist preview — show about 5 rows before scrolling.
+     Each row is min-height 44px + 1px border, so 5 rows ≈ 225px. */
+  .songs-scroll {
+    max-height: 240px;
+    overflow-y: auto;
+    touch-action: pan-y;
+    -webkit-overflow-scrolling: touch;
+  }
   .songs-scroll::-webkit-scrollbar { width: 3px; }
   .songs-scroll::-webkit-scrollbar-track { background: transparent; }
   .songs-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
   /* ─── BOTTOM CONTROLS ─── */
-  .bottom-controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .bottom-controls {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+    margin-top: 20px;   /* extra breathing room between songlist and controls */
+  }
   .ctrl-box {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; display: flex; flex-direction: column;
@@ -436,6 +446,12 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+  /* Keep the search box on the Songlist screen from shrinking or
+     stretching — it should stay its natural height so the card below
+     gets ALL remaining space to scroll inside. */
+  #screen-songlist > .search-box {
+    flex: 0 0 auto;
   }
   #screen-setlist  #setlist-list,
   #screen-songlist #full-songs-list {
