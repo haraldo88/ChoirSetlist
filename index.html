@@ -420,52 +420,41 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* On the Setlist screen and the Songlist screen the list is the only
-     content, so let it fill the full remaining viewport height. We
-     turn those screens into a proper flex column where the card (and
-     the list inside it) grows to fill the space the header doesn't
-     use. min-height:0 is the tricky-but-required part — without it,
-     a flex child's intrinsic content prevents the "overflow:auto"
-     from ever actually scrolling, which is what capped us at 7 rows. */
-  /* HARD-CAP the screen at the viewport height (not min-height!) so
-     the flex child inside can actually overflow and scroll. If we only
-     used min-height, the screen would just grow with its content and
-     nothing would ever trigger scrolling — which was the bug. */
+  /* NEW APPROACH: let the entire PAGE scroll on these two screens
+     instead of trying to scroll a flex-child list inside a fixed-height
+     container. Page scrolling is the iOS gold standard — it always
+     works, no matter how many nested onclick handlers or flex boxes
+     are in the way. The earlier flex attempts kept failing on iOS
+     because the scroll gesture wasn't being recognised on the inner
+     element. Trade-off: the header would scroll out of view, so we
+     pin it with position: sticky so it stays at the top of the viewport. */
   #screen-setlist.active,
   #screen-songlist.active {
-    height: 100vh;
-    height: 100dvh;               /* iOS-correct viewport unit */
-    max-height: 100vh;
-    max-height: 100dvh;
-    overflow: hidden;             /* prevents the page itself from scrolling */
-  }
-  #screen-setlist > .card,
-  #screen-songlist > .card {
-    flex: 1 1 0;
-    min-height: 0;
+    /* no height/overflow lock — content grows naturally, body scrolls */
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    gap: 12px;
   }
-  /* Keep the search box on the Songlist screen from shrinking or
-     stretching — it should stay its natural height so the card below
-     gets ALL remaining space to scroll inside. */
+  #screen-setlist > .header,
+  #screen-songlist > .header {
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
   #screen-songlist > .search-box {
-    flex: 0 0 auto;
+    position: sticky;
+    top: 64px;                 /* sit just under the sticky header */
+    background: var(--bg);
+    z-index: 9;
   }
+  /* Kill the generic .list-scroll max-height for these full-screen
+     lists — let them expand naturally; the PAGE handles scrolling. */
   #screen-setlist  #setlist-list,
   #screen-songlist #full-songs-list {
-    flex: 1 1 0;
-    min-height: 0;
-    max-height: none;             /* beat the generic .list-scroll cap above */
-    overflow-y: auto;
-    overflow-x: hidden;
-    /* Tell iOS this element handles vertical scrolling. Without this,
-       iOS Safari's gesture arbiter treats touches on rows (which have
-       onclick handlers) as clicks and never starts a scroll, even
-       though overflow:auto would otherwise allow it. */
-    touch-action: pan-y;
-    -webkit-overflow-scrolling: touch;
+    max-height: none;
+    overflow: visible;
   }
   .list-scroll::-webkit-scrollbar { width: 3px; }
   .list-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
