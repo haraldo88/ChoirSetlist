@@ -417,23 +417,32 @@
      use. min-height:0 is the tricky-but-required part — without it,
      a flex child's intrinsic content prevents the "overflow:auto"
      from ever actually scrolling, which is what capped us at 7 rows. */
+  /* HARD-CAP the screen at the viewport height (not min-height!) so
+     the flex child inside can actually overflow and scroll. If we only
+     used min-height, the screen would just grow with its content and
+     nothing would ever trigger scrolling — which was the bug. */
   #screen-setlist.active,
   #screen-songlist.active {
-    min-height: 100vh;
-    min-height: -webkit-fill-available;
+    height: 100vh;
+    height: 100dvh;               /* iOS-correct viewport unit */
+    max-height: 100vh;
+    max-height: 100dvh;
+    overflow: hidden;             /* prevents the page itself from scrolling */
   }
   #screen-setlist > .card,
   #screen-songlist > .card {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
   }
   #screen-setlist  #setlist-list,
   #screen-songlist #full-songs-list {
-    flex: 1 1 auto;
+    flex: 1 1 0;
     min-height: 0;
-    max-height: none;   /* beat the generic .list-scroll cap above */
+    max-height: none;             /* beat the generic .list-scroll cap above */
+    overflow-y: auto;
   }
   .list-scroll::-webkit-scrollbar { width: 3px; }
   .list-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
