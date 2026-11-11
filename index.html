@@ -3374,7 +3374,13 @@ function addSetlist() {
       state.songIndex = 0;
       saveData();
       closeModal();
-      renderSetlist();
+      // Defer the re-render into the next paint frame. On iOS Safari,
+      // rebuilding a list's innerHTML immediately after a modal close
+      // can occasionally skip the repaint, which is why newly-created
+      // setlists sometimes didn't appear until the app was reopened.
+      // requestAnimationFrame guarantees the browser has finished the
+      // modal-hide layout pass before we rebuild the list.
+      requestAnimationFrame(renderSetlist);
     }}
   ]);
   setTimeout(() => document.getElementById('new-sl-name')?.focus(), 50);
