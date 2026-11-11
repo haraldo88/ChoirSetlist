@@ -1719,6 +1719,46 @@ async function unlockAudio() {
   }
 }
 
+// After the app has been backgrounded or the phone has slept, iOS
+// silently SUSPENDS the AudioContext and PAUSES the silent <audio>
+// loop that we use to bypass the ring/silent switch. When the user
+// comes back, nothing auto-restarts them, so playback is silent until
+// something resumes them. Call this from any user-gesture entry point
+// before playing audio; it's a cheap no-op when everything is already
+// running.
+function resumeIfSuspended() {
+  try {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      // resume() returns a Promise but we don't need to await — the
+      // next playback call will just scheduling into the (resuming)
+      // context and iOS handles it.
+      const p = audioCtx.resume();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+    if (silentLoopEl && silentLoopEl.paused) {
+      const p = silentLoopEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+    // Re-assert the modern audio session type too — some iOS versions
+    // reset it on backgrounding.
+    if (navigator.audioSession) {
+      try { navigator.audioSession.type = 'playback'; } catch(_) {}
+    }
+  } catch (e) {
+    console.warn('resumeIfSuspended failed:', e);
+  }
+}
+
+// When the page becomes visible again (user switched back to the app,
+// unlocked the phone, etc.), try to resume automatically. iOS sometimes
+// rejects resume() outside a user gesture; that's fine, the next tap
+// on a play button will resume it via the inline calls below.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') resumeIfSuspended();
+});
+window.addEventListener('pageshow',  resumeIfSuspended);
+window.addEventListener('focus',     resumeIfSuspended);
+
 function getAudioCtx() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return audioCtx;
@@ -2146,6 +2186,9 @@ async function togglePlay() {
   // and visuals come up together. After the first successful load this
   // resolves instantly, so warm taps are not slowed down.
   unlockAudio();
+  // If the context was suspended while the app was backgrounded, this
+  // revives it (and the silent-switch workaround loop too).
+  resumeIfSuspended();
   const song = currentSong();
   if (!song) return;
   mainPlaying = true;
@@ -2375,6 +2418,7 @@ function renderPianoKeys() {
 
 function handlePianoPress(noteName, isBlack) {
   unlockAudio();
+  resumeIfSuspended(); // keep working after the app has been backgrounded
   playNote(noteName, 1.5);
 
   // flash key
@@ -2427,6 +2471,7 @@ async function togglePianoPlay() {
   }
   if (pianoNotes.length === 0) return;
   unlockAudio();
+  resumeIfSuspended(); // revive context + silent loop after backgrounding
   pianoPlayActive = true;
   const btn = document.getElementById('piano-play-btn');
   if (btn) { btn.textContent = '■'; btn.classList.add('playing'); }
