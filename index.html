@@ -401,7 +401,16 @@
   .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
 
   /* scrollable list area */
-  .list-scroll { max-height: 55vh; overflow-y: auto; }
+  /* Fill nearly the whole viewport minus the header + safe-area inset.
+     The old 55vh cap meant about 7 rows on iPhone before the list
+     visually stopped growing (though it still scrolled). calc() keeps
+     room for the header and iPhone notch/home-indicator without
+     relying on JS to measure them. */
+  .list-scroll {
+    max-height: calc(100vh - 110px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .list-scroll::-webkit-scrollbar { width: 3px; }
   .list-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
