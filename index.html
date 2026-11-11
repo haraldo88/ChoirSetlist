@@ -1627,6 +1627,14 @@ let pianoEndTimer = null;
 // a newer call (or a Stop) has superseded it during sample loading.
 let playSequenceGen = 0;
 
+// Tiny silent WAV used by the silent-switch workaround below. ~100 bytes.
+// A looping silent HTMLAudioElement forces iOS to route Web Audio through
+// the "media playback" channel (which ignores the ring/silent switch)
+// instead of the default "ambient" channel (which honours it).
+const SILENT_WAV_DATA_URL =
+  'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+let silentLoopEl = null;
+
 // iOS requires AudioContext to be created AND resumed inside a user gesture
 async function unlockAudio() {
   if (audioUnlocked) return;
@@ -1643,6 +1651,37 @@ async function unlockAudio() {
     src.buffer = silentBuf;
     src.connect(audioCtx.destination);
     src.start(0);
+
+    // ── Bypass the iOS silent switch ──────────────────────────────
+    // Two layered tricks; whichever works on the current iOS wins.
+    //
+    // 1) Modern WebKit (iOS 17+) exposes navigator.audioSession. Setting
+    //    type='playback' tells iOS this is intentional media playback,
+    //    which bypasses the ring/silent switch exactly like a music app.
+    try {
+      if (navigator.audioSession) {
+        navigator.audioSession.type = 'playback';
+      }
+    } catch(_) { /* not supported on this iOS — fall through to #2 */ }
+
+    // 2) Fallback for older iOS: a looping silent HTMLAudioElement with
+    //    playsinline tells iOS "a media element is playing", which
+    //    promotes the whole page's audio (including Web Audio samples)
+    //    to the media channel. We keep it looping forever; it costs
+    //    nothing because the buffer is truly zero-amplitude silence.
+    if (!silentLoopEl) {
+      silentLoopEl = new Audio(SILENT_WAV_DATA_URL);
+      silentLoopEl.loop = true;
+      silentLoopEl.setAttribute('playsinline', '');
+      silentLoopEl.setAttribute('webkit-playsinline', '');
+      silentLoopEl.volume = 0; // belt-and-braces; the file is silent anyway
+      // play() must be called from the same user gesture, which we are.
+      const p = silentLoopEl.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(err => console.warn('Silent loop failed to start:', err));
+      }
+    }
+
     audioUnlocked = true;
     // Now start loading samples in background
     loadAllSounds();
@@ -2413,14 +2452,16 @@ function renderSonglist() {
     const row = document.createElement('div');
     row.className = 'list-row' + (i === state.songIndex ? ' selected' : '');
     row.dataset.index = i;
-    // Drag handle and delete button are hidden for read-only setlists.
+    // Drag handle, rename and delete buttons are hidden for read-only setlists.
     const dragHandle  = readOnly ? '' : `<span class="drag-handle" title="Drag to reorder">⠿</span>`;
-    const deleteBtn   = readOnly ? '' : `<button class="btn-icon" style="width:28px;height:28px;font-size:11px" onclick="event.stopPropagation();deleteSong(${i})">✕</button>`;
+    const renameBtn   = readOnly ? '' : `<button class="btn-icon" style="width:28px;height:28px;font-size:12px" title="Rename" onclick="event.stopPropagation();renameSong(${i})">✎</button>`;
+    const deleteBtn   = readOnly ? '' : `<button class="btn-icon" style="width:28px;height:28px;font-size:11px" title="Delete" onclick="event.stopPropagation();deleteSong(${i})">✕</button>`;
     row.innerHTML = `
       ${dragHandle}
       <span class="list-idx">${i + 1}</span>
       <span class="list-name">${escapeHtml(song.name || '(unnamed)')}</span>
       <span style="font-size:10px;color:var(--muted)">${escapeHtml(song.time)} · ${escapeHtml(song.tempo)}bpm</span>
+      ${renameBtn}
       ${deleteBtn}`;
     row.onclick = (e) => {
       if (e.target.classList.contains('drag-handle') || e.target.closest('.btn-icon')) return;
@@ -2467,6 +2508,34 @@ function addSong() {
     }}
   ]);
   setTimeout(() => document.getElementById('new-song-name')?.focus(), 50);
+}
+
+function renameSong(i) {
+  const sl = currentSetlist();
+  if (!sl || !sl.songs[i]) return;
+  if (isCurrentSetlistReadOnly()) return; // belt-and-braces; UI hides the button
+  const song = sl.songs[i];
+  openModal('Rename Song', `
+    <input type="text" id="rename-song-input"
+           placeholder="Song name…"
+           value="${escapeHtml(song.name || '')}">
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Save', cls: 'btn-primary', onclick: () => {
+      const name = (document.getElementById('rename-song-input').value || '').trim();
+      if (!name) return; // silently ignore empty — user can still cancel
+      song.name = name;
+      saveData();
+      closeModal();
+      renderSonglist();
+      renderMain();
+    }}
+  ]);
+  // Auto-focus the field and select its contents so you can just type.
+  setTimeout(() => {
+    const el = document.getElementById('rename-song-input');
+    if (el) { el.focus(); el.select(); }
+  }, 50);
 }
 
 function deleteSong(i) {
