@@ -3555,10 +3555,27 @@ function deleteSetlistAt(i) {
       if (sl.id && sb && currentUser && navigator.onLine) {
         try {
           // songs cascade via FK on setlist_id; setlist_shares cascade too.
-          const { error } = await sb.from('setlists').delete().eq('id', sl.id);
+          // We append .select() so the response tells us how many rows
+          // were actually deleted — Supabase returns an empty array
+          // (NOT an error) when RLS silently blocks a delete, so we
+          // can't rely on `error` alone to detect failure.
+          const { data: deleted, error } = await sb
+            .from('setlists')
+            .delete()
+            .eq('id', sl.id)
+            .select();
           if (error) throw error;
+          if (!deleted || deleted.length === 0) {
+            throw new Error(
+              'Supabase accepted the request but 0 rows were deleted. ' +
+              'This usually means Row-Level Security denied the delete ' +
+              '(you may not be listed as the owner of this setlist). ' +
+              'Setlist id: ' + sl.id
+            );
+          }
         } catch (e) {
           if (deleteBtn) { deleteBtn.textContent = 'Delete'; deleteBtn.disabled = false; }
+          console.error('[delete-setlist] failed:', e);
           openModal('Delete Failed', `
             <p style="color:var(--muted);font-size:13px">
               ${escapeHtml((e && e.message) || 'Unknown error')}
