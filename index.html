@@ -854,7 +854,7 @@
     <div class="login-field">
       <input class="login-input" type="email" id="login-email" placeholder="Email" autocomplete="email" autocorrect="off" autocapitalize="none" spellcheck="false">
       <!-- Display name is only shown in signup mode. Set via JS. -->
-      <input class="login-input" type="text" id="login-display-name" placeholder="Display name" autocomplete="name" style="display:none">
+      <input class="login-input" type="text" id="login-display-name" placeholder="Full name" autocomplete="name" style="display:none">
       <input class="login-input" type="password" id="login-password" placeholder="Password" autocomplete="current-password">
       <div class="login-error" id="login-error"></div>
       <div class="login-info" id="login-info" style="display:none;color:var(--muted);font-size:12px;margin-bottom:8px;line-height:1.4"></div>
@@ -3912,7 +3912,7 @@ async function handleLoginSubmit() {
 
   try {
     if (loginMode === 'signup') {
-      if (!displayName) { setLoginError('Please enter a display name.'); return; }
+      if (!displayName) { setLoginError('Please enter your full name.'); return; }
       const { error } = await sb.auth.signUp({
         email,
         password,
