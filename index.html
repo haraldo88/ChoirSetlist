@@ -1669,6 +1669,24 @@ function saveData() {
   scheduleCloudSync();
 }
 
+// For destructive operations (delete setlist, delete song) where the
+// user may close the app within the 800ms debounce window — bypass
+// the debounce and fire the cloud sync immediately so the delete has
+// time to reach Supabase before the app is backgrounded. Otherwise
+// the next launch would fetch the still-present cloud copy and the
+// deletion would silently "come back".
+function saveDataNow() {
+  if (!currentUser) return;
+  ensureIds(data);
+  saveCachedData(currentUser.id, data);
+  // Cancel any pending debounced sync and fire immediately.
+  if (_syncTimer) { clearTimeout(_syncTimer); _syncTimer = null; }
+  // Don't await — the modal/callback should close right away. The
+  // sync runs in the background and the service worker keeps the
+  // connection alive for a short grace period after backgrounding.
+  syncToCloud();
+}
+
 function migrateNotes() {
   // One-time fix: ensure the three default songs have the correct notes
   const fixes = {
@@ -3101,7 +3119,8 @@ function removeSongFromSetlist(i) {
         state.songIndex = Math.max(0, sl.songs.length - 1);
       }
       resolveSongLinks(data);
-      saveData();
+      // Immediate sync so a quick app-close can't resurrect the row.
+      saveDataNow();
       closeModal();
       renderSonglist();
       renderMain();
@@ -3273,7 +3292,9 @@ function deleteSong(i) {
     { label: 'Delete', cls: 'btn-primary btn-danger', onclick: () => {
       sl.songs.splice(i, 1);
       if (state.songIndex >= sl.songs.length) state.songIndex = Math.max(0, sl.songs.length - 1);
-      saveData();
+      // Immediate sync so the delete isn't lost if the app is closed
+      // within the 800ms debounce window.
+      saveDataNow();
       closeModal();
       renderSonglist();
     }}
@@ -3520,7 +3541,10 @@ function deleteSetlistAt(i) {
       data.setlists.splice(i, 1);
       if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
       state.songIndex = 0;
-      saveData();
+      // Immediate sync — closing the app within the 800ms debounce
+      // window would otherwise leave the cloud copy alive, and the
+      // next launch would resurrect the setlist.
+      saveDataNow();
       closeModal();
       renderSetlist();
       renderMain();
