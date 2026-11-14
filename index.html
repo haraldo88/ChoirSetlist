@@ -3465,23 +3465,63 @@ async function removeSharedSetlist(i) {
   `, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Remove', cls: 'btn-primary btn-danger', onclick: async () => {
-      try {
-        // RLS on setlist_shares.shared_with policy allows recipients to
-        // SELECT but not DELETE — so we can't delete it ourselves under
-        // the current schema. Instead, just drop it locally; next cloud
-        // refresh would re-add it. For a true unshare, the owner has
-        // to revoke. (We could relax the RLS later if needed.)
-        data.setlists.splice(i, 1);
-        if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
-        state.songIndex = 0;
-        saveCachedData(currentUser.id, data);
-        closeModal();
-        renderSetlist();
-        renderMain();
-      } catch (e) {
-        console.warn('removeSharedSetlist failed:', e);
-        closeModal();
+      // Delete the setlist_shares row on the server — awaited — so
+      // the share is truly revoked before the modal closes. The new
+      // shares_recipient_delete RLS policy (see
+      // supabase-add-recipient-unshare.sql) lets the recipient
+      // delete their OWN share row; nothing else.
+      const modalBtns = document.querySelectorAll('#modal-btns button');
+      const removeBtn = modalBtns[modalBtns.length - 1];
+      if (removeBtn) {
+        removeBtn.textContent = 'Removing…';
+        removeBtn.disabled = true;
       }
+
+      if (sl.id && sb && currentUser && navigator.onLine) {
+        try {
+          const { data: deleted, error } = await sb
+            .from('setlist_shares')
+            .delete()
+            .eq('setlist_id', sl.id)
+            .eq('shared_with', currentUser.id)
+            .select();
+          if (error) throw error;
+          if (!deleted || deleted.length === 0) {
+            throw new Error(
+              'Server accepted the request but 0 share rows were ' +
+              'removed. This usually means the shares_recipient_delete ' +
+              'RLS policy is not installed — please run ' +
+              'supabase-add-recipient-unshare.sql in the Supabase SQL editor.'
+            );
+          }
+        } catch (e) {
+          if (removeBtn) { removeBtn.textContent = 'Remove'; removeBtn.disabled = false; }
+          console.error('[remove-shared-setlist] failed:', e);
+          openModal('Remove Failed', `
+            <p style="color:var(--muted);font-size:13px">
+              ${escapeHtml((e && e.message) || 'Unknown error')}
+            </p>
+          `, [{ label: 'OK', onclick: closeModal }]);
+          return;
+        }
+      }
+
+      // Server-side delete succeeded. Now drop it from local state.
+      data.setlists.splice(i, 1);
+      if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
+      state.songIndex = 0;
+      if (currentUser) {
+        saveCachedData(currentUser.id, data);
+        // Update lastSyncedIds so subsequent syncs don't attempt to
+        // re-delete this setlist's songs (which we never owned).
+        const prev = loadSyncedIds(currentUser.id);
+        const slSongIds = new Set((sl.songs || []).map(s => s.id));
+        prev.songs = (prev.songs || []).filter(id => !slSongIds.has(id));
+        saveSyncedIds(currentUser.id, prev);
+      }
+      closeModal();
+      renderSetlist();
+      renderMain();
     }}
   ]);
 }
