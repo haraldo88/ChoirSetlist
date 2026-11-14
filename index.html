@@ -84,6 +84,19 @@
     color: var(--accent); flex: 1;
     letter-spacing: -0.5px;
   }
+  /* Main-screen header overrides: three columns that center the title
+     between equal-flex side panels no matter what's in them. */
+  .main-header-side {
+    flex: 1 1 0;
+    display: flex; align-items: center; gap: 6px;
+    min-width: 0;
+  }
+  .main-header-side.right { justify-content: flex-end; }
+  .main-header-title {
+    flex: 0 0 auto;
+    text-align: center;
+    white-space: nowrap;
+  }
   .btn-icon {
     background: var(--surface2); border: 1px solid var(--border);
     color: var(--text); width: 44px; height: 44px;
@@ -777,14 +790,22 @@
 
 <!-- ═══════════════════════════════ MAIN SCREEN ═══════════════════════════════ -->
 <div id="screen-main" class="screen">
-  <div class="header">
-    <div class="header-title">Choir Setlist</div>
-    <span id="sync-status" data-state="synced" title="Sync status — tap for details" onclick="showLastSyncError()"></span>
-    <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()" title="Account">
-      <span id="user-avatar-small"></span>
-    </button>
-    <button class="btn-icon" onclick="showScreen('screen-about')" title="About">i</button>
-    <button class="btn-icon" onclick="showScreen('screen-setlist')" title="Setlists">≡</button>
+  <!-- Main-screen header layout: Account on the far LEFT, title DEAD
+       CENTER, About + Setlists on the RIGHT. The two wrapper divs have
+       equal flex:1 so the title column is centered regardless of how
+       many icons are on either side. -->
+  <div class="header main-header">
+    <div class="main-header-side left">
+      <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()" title="Account">
+        <span id="user-avatar-small"></span>
+      </button>
+    </div>
+    <div class="header-title main-header-title">Choir Setlist</div>
+    <div class="main-header-side right">
+      <span id="sync-status" data-state="synced" title="Sync status — tap for details" onclick="showLastSyncError()"></span>
+      <button class="btn-icon" onclick="showScreen('screen-about')" title="About">i</button>
+      <button class="btn-icon" onclick="showScreen('screen-setlist')" title="Setlists">≡</button>
+    </div>
   </div>
 
   <!-- Rhythm Box -->
