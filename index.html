@@ -468,11 +468,19 @@
   .about-sub { text-align: center; color: var(--muted); font-size: 12px; letter-spacing: 2px; margin-bottom: 20px; }
   .about-desc { color: #aaa; font-size: 13px; line-height: 1.7; text-align: center; }
 
-  .list-row { touch-action: none; }
+  /* pan-y (not "none"!) so rows ALLOW vertical scrolling of the list
+     while still accepting tap clicks. The old "touch-action: none" was
+     the reason the Setlist and Songlist screens refused to scroll on
+     iPhone — every touch started on a row, and "none" told iOS to
+     ignore the touch for every gesture, including scroll. The
+     drag-handle below has its own touch-action: none because dragging
+     a specific handle is a different gesture from scrolling the list. */
+  .list-row { touch-action: pan-y; }
   .drag-handle {
     width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
     color: var(--muted); font-size: 16px; cursor: grab; flex-shrink: 0;
     -webkit-tap-highlight-color: transparent; user-select: none;
+    touch-action: none;  /* explicit: drag-reorder handles all touches here */
   }
   .drag-handle:active { cursor: grabbing; }
   .list-row.dragging {
@@ -993,7 +1001,7 @@
     <div class="about-logo">♩ Choir<br>Setlist</div>
     <div class="about-sub">WEB EDITION</div>
     <div class="about-desc">
-      A tool for choir conductors to manage setlists, set the pitch for each song, and keep the beat. Tap the rhythm box to practice your time signature. Use the piano to set starting notes for your singers.
+      A tool for choir conductors to manage setlists. Set the starting notes and the tempo for each song. Tap the rhythm box to set tempo and time signature. Use the piano to set starting notes.
     </div>
     <div style="margin-top:16px;text-align:center;color:var(--muted);font-size:11px">
       Copyright © Harald Olderheim
