@@ -3536,15 +3536,55 @@ function deleteSetlistAt(i) {
   if (!sl) return;
   openModal('Delete Setlist', `<p style="color:var(--muted)">Delete "${escapeHtml(sl.name)}" and all its songs?</p>`, [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
-    { label: 'Delete', cls: 'btn-primary btn-danger', onclick: () => {
+    { label: 'Delete', cls: 'btn-primary btn-danger', onclick: async () => {
       if (data.setlists.length <= 1) { closeModal(); return alert('Cannot delete the last setlist.'); }
+
+      // Delete from the cloud FIRST — awaited — so the modal stays up
+      // until the server confirms. This fixes the "deleted setlist
+      // comes back after reopen" bug: the previous fire-and-forget
+      // sync approach let iOS background the page before the DELETE
+      // network call had completed. Now the user sees "Deleting…"
+      // until it's done.
+      const modalBtns = document.querySelectorAll('#modal-btns button');
+      const deleteBtn = modalBtns[modalBtns.length - 1]; // the Delete button
+      if (deleteBtn) {
+        deleteBtn.textContent = 'Deleting…';
+        deleteBtn.disabled = true;
+      }
+
+      if (sl.id && sb && currentUser && navigator.onLine) {
+        try {
+          // songs cascade via FK on setlist_id; setlist_shares cascade too.
+          const { error } = await sb.from('setlists').delete().eq('id', sl.id);
+          if (error) throw error;
+        } catch (e) {
+          if (deleteBtn) { deleteBtn.textContent = 'Delete'; deleteBtn.disabled = false; }
+          openModal('Delete Failed', `
+            <p style="color:var(--muted);font-size:13px">
+              ${escapeHtml((e && e.message) || 'Unknown error')}
+            </p>
+          `, [{ label: 'OK', onclick: closeModal }]);
+          return;
+        }
+      }
+
+      // Cloud delete succeeded — now update local state.
       data.setlists.splice(i, 1);
       if (state.setlistIndex >= data.setlists.length) state.setlistIndex = data.setlists.length - 1;
       state.songIndex = 0;
-      // Immediate sync — closing the app within the 800ms debounce
-      // window would otherwise leave the cloud copy alive, and the
-      // next launch would resurrect the setlist.
-      saveDataNow();
+
+      // Keep the lastSyncedIds snapshot in sync so the next debounced
+      // sync's diff doesn't try to redundantly re-delete this setlist
+      // or complain about missing songs.
+      if (currentUser) {
+        const prev = loadSyncedIds(currentUser.id);
+        prev.setlists = (prev.setlists || []).filter(id => id !== sl.id);
+        const slSongIds = new Set((sl.songs || []).map(s => s.id));
+        prev.songs = (prev.songs || []).filter(id => !slSongIds.has(id));
+        saveSyncedIds(currentUser.id, prev);
+        saveCachedData(currentUser.id, data);
+      }
+
       closeModal();
       renderSetlist();
       renderMain();
