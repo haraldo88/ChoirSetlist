@@ -687,14 +687,21 @@
   }
   .login-user-name { flex: 1; font-size: 14px; }
   .login-user-hint { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+  /* Same square look as the other header .btn-icon buttons so it
+     visually matches. Only shows 1-2 letters of the display name. */
   .user-menu-btn {
     background: var(--surface2); border: 1px solid var(--border);
-    border-radius: 8px; padding: 6px 10px;
-    font-size: 11px; color: var(--muted); cursor: pointer;
-    font-family: 'DM Mono', monospace; letter-spacing: 1px;
-    -webkit-tap-highlight-color: transparent; display: flex; align-items: center; gap: 6px;
+    color: var(--text);
+    width: 44px; height: 44px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    font-family: 'Playfair Display', serif;
+    font-size: 16px; font-weight: 700;
+    flex-shrink: 0; -webkit-tap-highlight-color: transparent;
+    transition: all .15s;
   }
-  .user-menu-btn:active { border-color: var(--accent); color: var(--accent); }
+  .user-menu-btn:active { border-color: var(--accent); color: var(--accent); transform: scale(0.92); }
 
   /* ─── EXPANDED VOLUME OVERLAY ─── */
   .vol-overlay {
@@ -773,12 +780,11 @@
   <div class="header">
     <div class="header-title">Choir Setlist</div>
     <span id="sync-status" data-state="synced" title="Sync status — tap for details" onclick="showLastSyncError()"></span>
-    <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()">
-      <span id="user-avatar-small" style="font-family:'Playfair Display',serif;font-weight:700"></span>
-      <span id="user-name-small"></span>
+    <button class="user-menu-btn" id="user-menu-btn" onclick="openUserMenu()" title="Account">
+      <span id="user-avatar-small"></span>
     </button>
-    <button class="btn-icon" onclick="showScreen('screen-setlist')" title="Setlists">≡</button>
     <button class="btn-icon" onclick="showScreen('screen-about')" title="About">i</button>
+    <button class="btn-icon" onclick="showScreen('screen-setlist')" title="Setlists">≡</button>
   </div>
 
   <!-- Rhythm Box -->
@@ -800,7 +806,6 @@
       <div class="songlist-btns">
         <button class="btn-icon" onclick="showScreen('screen-songlist')" title="Expand">⤢</button>
         <button class="btn-icon" onclick="addSong()" title="Add Song">+</button>
-        <button class="btn-icon" onclick="showScreen('screen-setlist')" title="Setlists">≡</button>
       </div>
     </div>
     <div class="songs-scroll" id="main-songs-list"></div>
@@ -1691,8 +1696,18 @@ async function loginUser(supabaseUser) {
 
 function updateUserHeaderDisplay() {
   if (!currentUser) return;
-  document.getElementById('user-avatar-small').textContent = currentUser.displayName.charAt(0).toUpperCase();
-  document.getElementById('user-name-small').textContent = currentUser.displayName;
+  // Up to two initials — first letter of the first word, plus first
+  // letter of the last word when there's more than one. "Harald
+  // Olderheim" → "HO", "Harald" → "H".
+  const name = (currentUser.displayName || '').trim();
+  const parts = name.split(/\s+/).filter(Boolean);
+  let initials = '';
+  if (parts.length >= 2) {
+    initials = parts[0][0] + parts[parts.length - 1][0];
+  } else if (parts.length === 1) {
+    initials = parts[0][0];
+  }
+  document.getElementById('user-avatar-small').textContent = initials.toUpperCase();
 }
 
 function openUserMenu() {
