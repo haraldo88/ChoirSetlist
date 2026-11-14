@@ -2941,8 +2941,25 @@ function openSongRowMenu(i) {
   const song = sl.songs[i];
   const readOnly = isCurrentSetlistReadOnly();
   const hasPdf   = !!song.sheet_music_path;
+  // "Exists in other setlists" is true when either this row is a link
+  // (its canonical lives in another setlist) or this row IS a canonical
+  // that one or more other rows link to. In either case, removing just
+  // this row doesn't destroy the song everywhere — it stays in the
+  // other setlists.
+  const isLink   = !!song.linked_song_id;
+  const hasRefs  = !!song.id && (data.setlists || []).some(other =>
+    (other.songs || []).some(s => s.linked_song_id === song.id));
+  const existsElsewhere = isLink || hasRefs;
 
   let itemsHtml = '';
+
+  // ── "Remove from setlist" FIRST, only when safe (song lives elsewhere).
+  if (!readOnly && existsElsewhere) {
+    itemsHtml += `
+      <button class="sl-menu-item" data-action="remove-from-setlist">
+        <span class="sl-menu-icon">↩</span> Remove from setlist
+      </button>`;
+  }
 
   if (hasPdf) {
     itemsHtml += `
@@ -2966,7 +2983,7 @@ function openSongRowMenu(i) {
         <span class="sl-menu-icon">✎</span> Edit song name
       </button>
       <button class="sl-menu-item danger" data-action="delete">
-        <span class="sl-menu-icon">✕</span> Delete song
+        <span class="sl-menu-icon">✕</span> Delete song${existsElsewhere ? ' everywhere' : ''}
       </button>`;
   } else if (!hasPdf) {
     itemsHtml += `<p style="color:var(--muted);font-size:13px;padding:8px 2px">
@@ -2983,12 +3000,92 @@ function openSongRowMenu(i) {
     if (!btn) return;
     const action = btn.dataset.action;
     closeModal();
-    if (action === 'view-sheet')   viewSheetMusic(i);
-    if (action === 'upload-sheet') uploadSheetMusic(i);
-    if (action === 'remove-sheet') removeSheetMusic(i);
-    if (action === 'rename')       renameSong(i);
-    if (action === 'delete')       deleteSong(i);
+    if (action === 'remove-from-setlist') removeSongFromSetlist(i);
+    if (action === 'view-sheet')          viewSheetMusic(i);
+    if (action === 'upload-sheet')        uploadSheetMusic(i);
+    if (action === 'remove-sheet')        removeSheetMusic(i);
+    if (action === 'rename')              renameSong(i);
+    if (action === 'delete')              deleteSong(i);
   };
+}
+
+// "Remove from setlist" — take this one appearance of the song out of
+// the current setlist without destroying it elsewhere. Two cases:
+//
+//   1. This row is a LINK — the canonical lives in another setlist.
+//      Just remove this row; the canonical stays put. Easy case.
+//
+//   2. This row IS the canonical, and other setlists link to it.
+//      We can't just delete it — the cascade would wipe the links too.
+//      Fix: pick one of the links, promote it to be the new canonical
+//      (null out its linked_song_id and copy the data fields onto it),
+//      re-point every other link to the promoted row, then remove the
+//      original. From the user's point of view, the song still exists
+//      in every setlist it was in — just under new plumbing.
+function removeSongFromSetlist(i) {
+  const sl = currentSetlist();
+  if (!sl || !sl.songs[i]) return;
+  if (isCurrentSetlistReadOnly()) return;
+  const song = sl.songs[i];
+  const isLink = !!song.linked_song_id;
+
+  openModal('Remove From Setlist', `
+    <p style="color:var(--muted);font-size:13px">
+      Remove "<strong style="color:var(--text)">${escapeHtml(song.name)}</strong>"
+      from this setlist? It will stay available in the other setlist(s)
+      where it exists.
+    </p>
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
+    { label: 'Remove', cls: 'btn-primary', onclick: () => {
+      if (!isLink && song.id) {
+        // Case 2: promote one of the links to canonical.
+        let promoted = null;
+        for (const other of (data.setlists || [])) {
+          if (promoted) break;
+          for (const s of (other.songs || [])) {
+            if (s.linked_song_id === song.id) {
+              // Promote this one: copy canonical data onto it and
+              // null out its linked_song_id so it becomes the new
+              // source of truth.
+              s.name             = song.name;
+              s.time             = song.time;
+              s.tempo            = song.tempo;
+              s.notes            = Array.isArray(song.notes) ? song.notes.slice() : [];
+              s.sheet_music_path = song.sheet_music_path || null;
+              s.linked_song_id   = null;
+              delete s._isLink;
+              delete s._canonicalId;
+              promoted = s;
+              break;
+            }
+          }
+        }
+        // Re-point every other link from the old canonical to the
+        // promoted row so they keep working.
+        if (promoted) {
+          (data.setlists || []).forEach(other =>
+            (other.songs || []).forEach(s => {
+              if (s !== promoted && s.linked_song_id === song.id) {
+                s.linked_song_id = promoted.id;
+                s._canonicalId   = promoted.id;
+              }
+            })
+          );
+        }
+      }
+      // Finally remove this row from the current setlist.
+      sl.songs.splice(i, 1);
+      if (state.songIndex >= sl.songs.length) {
+        state.songIndex = Math.max(0, sl.songs.length - 1);
+      }
+      resolveSongLinks(data);
+      saveData();
+      closeModal();
+      renderSonglist();
+      renderMain();
+    }}
+  ]);
 }
 
 // Upload a PDF to Supabase Storage at <setlist_id>/<song_id>.pdf
