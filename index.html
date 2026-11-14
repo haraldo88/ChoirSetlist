@@ -420,41 +420,29 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* NEW APPROACH: let the entire PAGE scroll on these two screens
-     instead of trying to scroll a flex-child list inside a fixed-height
-     container. Page scrolling is the iOS gold standard — it always
-     works, no matter how many nested onclick handlers or flex boxes
-     are in the way. The earlier flex attempts kept failing on iOS
-     because the scroll gesture wasn't being recognised on the inner
-     element. Trade-off: the header would scroll out of view, so we
-     pin it with position: sticky so it stays at the top of the viewport. */
+  /* FINAL APPROACH: make the SCREEN itself the scroll container.
+     In iOS PWA standalone mode, body-level scrolling behaves oddly —
+     touches sometimes just don't register as scroll gestures. But a
+     fixed-height element with overflow-y: auto is iOS's bread and
+     butter and scrolls reliably. So on these two screens we:
+       1. Lock the screen to the viewport height.
+       2. Turn the screen itself into the vertical scroller.
+       3. Clear the list's own max-height so it just expands as tall
+          as its rows need, and the screen scrolls over all of them.
+     No flex-child-with-overflow nesting; no sticky header. Simple. */
   #screen-setlist.active,
   #screen-songlist.active {
-    /* no height/overflow lock — content grows naturally, body scrolls */
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    height: 100vh;
+    height: 100dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
   }
-  #screen-setlist > .header,
-  #screen-songlist > .header {
-    position: sticky;
-    top: 0;
-    background: var(--bg);
-    z-index: 10;
-    padding-top: max(12px, env(safe-area-inset-top));
-  }
-  #screen-songlist > .search-box {
-    position: sticky;
-    top: 64px;                 /* sit just under the sticky header */
-    background: var(--bg);
-    z-index: 9;
-  }
-  /* Kill the generic .list-scroll max-height for these full-screen
-     lists — let them expand naturally; the PAGE handles scrolling. */
   #screen-setlist  #setlist-list,
   #screen-songlist #full-songs-list {
     max-height: none;
-    overflow: visible;
+    overflow: visible;   /* the screen above handles scrolling */
   }
   .list-scroll::-webkit-scrollbar { width: 3px; }
   .list-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
