@@ -1001,7 +1001,7 @@
     <div class="about-logo">♩ Choir<br>Setlist</div>
     <div class="about-sub">WEB EDITION</div>
     <div class="about-desc">
-      A tool for choir conductors to manage setlists. Set the starting notes and the tempo for each song. Tap the rhythm box to set tempo and time signature. Use the piano to set starting notes.
+      A tool for choir conductors to manage setlists. Set the starting notes and the tempo for each song. Tap the rhythm box to set tempo and time signature. Tap the piano to set starting notes. The piano can also be used as a "piano only".
     </div>
     <div style="margin-top:16px;text-align:center;color:var(--muted);font-size:11px">
       Copyright © Harald Olderheim
@@ -1208,16 +1208,24 @@ async function fetchDataFromCloud(userId) {
   const allSetlistIds = (ownedSls || []).map(s => s.id)
     .concat(sharedSls.map(s => s.id))
     .concat(['00000000-0000-0000-0000-000000000000']);  // dummy so .in() never empty
-  // We request sheet_music_path, but fall back to the legacy column
-  // set if the DB hasn't had the migration run yet. That way an app
-  // that's deployed before the SQL patch still boots instead of
-  // hanging on the auth-loading screen.
+  // We request the full column set (sheet_music_path + linked_song_id),
+  // but fall back to a legacy set if the DB hasn't had the migrations
+  // run yet. That way an app that's deployed before a SQL patch still
+  // boots instead of hanging on the auth-loading screen.
   let songs, e4;
   ({ data: songs, error: e4 } = await sb
     .from('songs')
-    .select('id, setlist_id, name, time_sig, tempo, notes, position, sheet_music_path')
+    .select('id, setlist_id, name, time_sig, tempo, notes, position, sheet_music_path, linked_song_id')
     .in('setlist_id', allSetlistIds)
     .order('position', { ascending: true }));
+  if (e4 && /linked_song_id/i.test(e4.message || '')) {
+    console.warn('[cloud] linked_song_id column missing — run supabase-add-song-linking.sql. Falling back.');
+    ({ data: songs, error: e4 } = await sb
+      .from('songs')
+      .select('id, setlist_id, name, time_sig, tempo, notes, position, sheet_music_path')
+      .in('setlist_id', allSetlistIds)
+      .order('position', { ascending: true }));
+  }
   if (e4 && /sheet_music_path/i.test(e4.message || '')) {
     console.warn('[cloud] sheet_music_path column missing — run supabase-add-sheet-music.sql. Falling back.');
     ({ data: songs, error: e4 } = await sb
@@ -1248,12 +1256,13 @@ async function fetchDataFromCloud(userId) {
     const sl = byId[row.setlist_id];
     if (!sl) return;
     sl.songs.push({
-      id:    row.id,
-      name:  row.name || '',
-      time:  row.time_sig || '4/4',
-      tempo: row.tempo || 120,
-      notes: Array.isArray(row.notes) ? row.notes : [],
-      sheet_music_path: row.sheet_music_path || null
+      id:               row.id,
+      name:             row.name || '',
+      time:             row.time_sig || '4/4',
+      tempo:            row.tempo || 120,
+      notes:            Array.isArray(row.notes) ? row.notes : [],
+      sheet_music_path: row.sheet_music_path || null,
+      linked_song_id:   row.linked_song_id || null
     });
   });
 
@@ -1261,10 +1270,57 @@ async function fetchDataFromCloud(userId) {
   const ordered = (ownedSls || []).map(sl => byId[sl.id])
                   .concat(sharedSls.map(sl => byId[sl.id]));
 
-  return {
+  const result = {
     volume:   (loadCachedData(userId) || {}).volume ?? DEFAULT_DATA.volume,
     setlists: ordered
   };
+  resolveSongLinks(result);
+  return result;
+}
+
+// For every song that has linked_song_id set, overlay the canonical
+// song's display fields onto it. This runs after the full data load
+// so cross-setlist links can be resolved. If the canonical can't be
+// found (e.g. the sharing chain was broken), the link row keeps
+// whatever stale data it has, which is better than showing blank.
+function resolveSongLinks(d) {
+  if (!d || !Array.isArray(d.setlists)) return;
+  const byId = new Map();
+  d.setlists.forEach(sl => (sl.songs || []).forEach(s => {
+    if (s && s.id) byId.set(s.id, s);
+  }));
+  // Follow a chain of links down to the terminal canonical song.
+  const findCanonical = (s, depth = 0) => {
+    if (!s || !s.linked_song_id || depth > 5) return s;
+    const next = byId.get(s.linked_song_id);
+    return next ? findCanonical(next, depth + 1) : s;
+  };
+  d.setlists.forEach(sl => (sl.songs || []).forEach(s => {
+    if (!s || !s.linked_song_id) return;
+    const target = findCanonical(s);
+    if (!target || target === s) return;
+    s.name             = target.name;
+    s.time             = target.time;
+    s.tempo            = target.tempo;
+    s.notes            = Array.isArray(target.notes) ? target.notes.slice() : [];
+    s.sheet_music_path = target.sheet_music_path;
+    s._isLink          = true;
+    s._canonicalId     = target.id;
+  }));
+}
+
+// Given a song (possibly a link), return the canonical song object
+// anywhere in the current data. Used by all mutation helpers below
+// so edits to a linked song propagate everywhere instead of being
+// silently discarded on the next sync.
+function findCanonicalSong(song) {
+  if (!song || !song.linked_song_id) return song;
+  for (const sl of (data.setlists || [])) {
+    for (const s of (sl.songs || [])) {
+      if (s.id === song.linked_song_id) return findCanonicalSong(s);
+    }
+  }
+  return song; // fallback — canonical not loaded (shouldn't happen)
 }
 
 // Load a user's data on login. Tries the cloud first, falls back to the
@@ -1401,9 +1457,9 @@ async function syncToCloud() {
     const songRows = [];
     owned.concat(sharedEdit).forEach(sl => {
       (sl.songs || []).forEach((s, j) => {
-        // Only include sheet_music_path when the song actually has one;
-        // omitting the key for the common case (no PDF) means an un-
-        // migrated DB still accepts the upsert.
+        // Only include sheet_music_path and linked_song_id when actually
+        // set — omitting the key for the common case means an un-migrated
+        // DB still accepts the upsert.
         const row = {
           id:         s.id,
           setlist_id: sl.id,
@@ -1414,6 +1470,7 @@ async function syncToCloud() {
           position:   j
         };
         if (s.sheet_music_path) row.sheet_music_path = s.sheet_music_path;
+        if (s.linked_song_id)   row.linked_song_id   = s.linked_song_id;
         songRows.push(row);
       });
     });
@@ -2368,8 +2425,11 @@ function saveRhythmAndBack() {
   stopRhythmPlay();
   const song = currentSong();
   if (song) {
-    song.tempo = rhythmTempo;
-    song.time = rhythmTimeSig;
+    // Linked songs: write tempo + time signature to the canonical.
+    const target = findCanonicalSong(song);
+    target.tempo = rhythmTempo;
+    target.time  = rhythmTimeSig;
+    resolveSongLinks(data);
     saveData();
   }
   showScreen('screen-main');
@@ -2552,7 +2612,11 @@ function savePianoAndBack() {
   stopPianoPlay();
   const song = currentSong();
   if (song) {
-    song.notes = [...pianoNotes];
+    // If this song is a link, write the note change to the canonical
+    // so every setlist that references this song sees the new notes.
+    const target = findCanonicalSong(song);
+    target.notes = [...pianoNotes];
+    resolveSongLinks(data);
     saveData();
   }
   showScreen('screen-main');
@@ -2621,13 +2685,44 @@ function renderSonglist() {
   }
 }
 
+// The + button on the Main screen. Shows a chooser between creating
+// a brand new song and adding a copy of one that already exists in
+// any of the user's own or shared setlists.
 function addSong() {
   const sl = currentSetlist();
   if (!sl) return showModal('No Setlist', '<p style="color:var(--muted)">Please create a setlist first.</p>', [{ label: 'OK', onclick: closeModal }]);
   if (isCurrentSetlistReadOnly()) {
     return openModal('View Only', '<p style="color:var(--muted)">This setlist was shared with you in view-only mode. Use the ⋯ menu → Copy to make your own editable copy.</p>', [{ label: 'OK', onclick: closeModal }]);
   }
-  openModal('New Song', `<input type="text" id="new-song-name" placeholder="Song name…"><input type="number" id="new-song-tempo" placeholder="Tempo (BPM)" value="120" min="20" max="300">`, [
+  openModal('Add Song', `
+    <button class="sl-menu-item" data-action="create">
+      <span class="sl-menu-icon">✎</span> Create new song
+    </button>
+    <button class="sl-menu-item" data-action="existing">
+      <span class="sl-menu-icon">📚</span> Add existing song
+    </button>
+  `, [
+    { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal }
+  ]);
+  document.getElementById('modal-body').onclick = (e) => {
+    const btn = e.target.closest('.sl-menu-item');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    closeModal();
+    if (action === 'create')   openCreateSongModal();
+    if (action === 'existing') openAddExistingSongModal();
+  };
+}
+
+// The original "fill in name + tempo" flow, extracted so the chooser
+// above can route to it.
+function openCreateSongModal() {
+  const sl = currentSetlist();
+  if (!sl) return;
+  openModal('New Song',
+    `<input type="text" id="new-song-name" placeholder="Song name…">
+     <input type="number" id="new-song-tempo" placeholder="Tempo (BPM)" value="120" min="20" max="300">`,
+  [
     { label: 'Cancel', cls: 'btn-ghost', onclick: closeModal },
     { label: 'Add', cls: 'btn-primary', onclick: () => {
       const name = document.getElementById('new-song-name').value.trim();
@@ -2641,6 +2736,183 @@ function addSong() {
     }}
   ]);
   setTimeout(() => document.getElementById('new-song-name')?.focus(), 50);
+}
+
+// "Add existing song" — picker across every song in every setlist
+// the user has access to. Two behaviours depending on access:
+//
+//   • Edit access to the source's setlist → LINK. A new row is created
+//     with linked_song_id pointing at the canonical, so editing the
+//     name / tempo / notes / PDF anywhere updates all references.
+//     "One version of the song" is the point.
+//
+//   • Read-only access (e.g. a view-only shared setlist) → COPY. A
+//     fresh standalone song is created with " (copy)" appended to its
+//     name. If the source has sheet music, the PDF file is duplicated
+//     into the new setlist's folder in Storage so the copy is truly
+//     independent — you can still see the PDF even if the original
+//     share is later revoked.
+function openAddExistingSongModal() {
+  const sl = currentSetlist();
+  if (!sl) return;
+
+  // Collect-and-dedupe across all setlists. For each dedupe key, prefer
+  // an editable source (so you get to link rather than copy when at
+  // all possible). Track which setlist the source came from so we can
+  // check edit permission and look up the PDF's storage folder.
+  const seen = new Map();  // key -> { song, sourceSl, canEdit }
+  (data.setlists || []).forEach(otherSl => {
+    (otherSl.songs || []).forEach(song => {
+      const key = (song.name || '').trim().toLowerCase();
+      if (!key || !song.id) return;
+      const canEdit = !otherSl._shared || otherSl._permission === 'edit';
+      const existing = seen.get(key);
+      if (!existing || (canEdit && !existing.canEdit)) {
+        seen.set(key, { song, sourceSl: otherSl, canEdit });
+      }
+    });
+  });
+  const all = [...seen.values()]
+    .sort((a, b) => (a.song.name || '').localeCompare(
+      b.song.name || '', undefined, { sensitivity: 'base' }));
+
+  if (all.length === 0) {
+    openModal('No Songs Yet', `
+      <p style="color:var(--muted);font-size:13px">
+        You don't have any songs in any setlist yet. Create a new song first.
+      </p>
+    `, [{ label: 'OK', onclick: closeModal }]);
+    return;
+  }
+
+  // ~3 visible rows at a time. Each row shows name, meta line, and a
+  // tag saying whether tapping will LINK or COPY so the user knows
+  // what to expect.
+  const rowsHtml = all.map((entry, idx) => {
+    const song = entry.song;
+    const tag  = entry.canEdit
+      ? '<span style="font-size:9px;letter-spacing:1px;color:var(--accent);background:rgba(107,205,253,0.12);padding:1px 5px;border-radius:4px">LINK</span>'
+      : '<span style="font-size:9px;letter-spacing:1px;color:#d9a44b;background:rgba(217,164,75,0.12);padding:1px 5px;border-radius:4px">COPY</span>';
+    return `
+      <button class="sl-menu-item" data-idx="${idx}" style="padding:12px 10px">
+        <span style="flex:1;text-align:left">
+          <div style="color:var(--text);font-size:14px;display:flex;align-items:center;gap:6px">
+            <span>${escapeHtml(song.name || '(unnamed)')}</span>
+            ${tag}
+          </div>
+          <div style="color:var(--muted);font-size:10px;margin-top:2px">
+            ${escapeHtml(song.time || '4/4')} · ${escapeHtml(String(song.tempo || 120))}bpm
+          </div>
+        </span>
+      </button>`;
+  }).join('');
+
+  openModal('Add Existing Song', `
+    <p style="color:var(--muted);font-size:12px;margin-bottom:8px">
+      <strong style="color:var(--accent)">LINK</strong> = edits sync everywhere.
+      <strong style="color:#d9a44b">COPY</strong> = standalone, with its own PDF.
+    </p>
+    <div id="existing-songs-scroll"
+         style="max-height:200px; overflow-y:auto; touch-action:pan-y;
+                -webkit-overflow-scrolling:touch;
+                border:1px solid var(--border); border-radius:8px; padding:4px">
+      ${rowsHtml}
+    </div>
+  `, [
+    { label: 'Close', cls: 'btn-ghost', onclick: closeModal }
+  ]);
+
+  document.getElementById('modal-body').onclick = async (e) => {
+    const btn = e.target.closest('.sl-menu-item[data-idx]');
+    if (!btn) return;
+    const idx = parseInt(btn.dataset.idx, 10);
+    const entry = all[idx];
+    if (!entry) return;
+    const src       = entry.song;
+    const canEdit   = entry.canEdit;
+    const srcSl     = entry.sourceSl;
+    const canonical = findCanonicalSong(src);  // follow any existing links
+
+    if (canEdit) {
+      // ── LINK path ───────────────────────────────────────────────
+      // A link row carries display fields as a cache (so it renders
+      // before the next cloud fetch resolves the link); the real data
+      // of record is on the canonical.
+      sl.songs.push({
+        name:             canonical.name,
+        time:             canonical.time,
+        tempo:            canonical.tempo,
+        notes:            Array.isArray(canonical.notes) ? canonical.notes.slice() : [],
+        sheet_music_path: canonical.sheet_music_path || null,
+        linked_song_id:   canonical.id,
+        _isLink:          true,
+        _canonicalId:     canonical.id
+      });
+      ensureIds(data);
+      state.songIndex = sl.songs.length - 1;
+      saveData();
+      closeModal();
+      renderMain();
+      renderSonglist();
+      return;
+    }
+
+    // ── COPY path ─────────────────────────────────────────────────
+    // Standalone song; append " (copy)" to the name so it's clear it
+    // isn't the original. If the source has sheet music, duplicate
+    // the PDF file into the new setlist's folder.
+    const copyName = (src.name || '(unnamed)') + ' (copy)';
+    const copy = {
+      name:  copyName,
+      time:  src.time || '4/4',
+      tempo: src.tempo || 120,
+      notes: Array.isArray(src.notes) ? src.notes.slice() : []
+    };
+    sl.songs.push(copy);
+    ensureIds(data); // assigns a fresh uuid
+    const newSongId = copy.id;
+    state.songIndex = sl.songs.length - 1;
+
+    if (src.sheet_music_path && srcSl && srcSl.id) {
+      // Duplicate the PDF. Supabase Storage's .copy() takes care of
+      // the actual byte-for-byte duplication server-side. The user
+      // needs READ access to the source path (they do — they're
+      // viewing it via a share) and INSERT on the destination path
+      // (they do — they own this setlist).
+      openModal('Copying…', `
+        <p style="color:var(--muted);font-size:13px">
+          Duplicating sheet music…
+        </p>
+      `, []);
+      try {
+        const newPath = `${sl.id}/${newSongId}.pdf`;
+        const { error } = await sb.storage.from('sheet-music')
+          .copy(src.sheet_music_path, newPath);
+        if (error) throw error;
+        copy.sheet_music_path = newPath;
+      } catch (err) {
+        console.warn('PDF copy failed:', err);
+        // Keep going — the song copy is still useful without the PDF.
+        // Surface the problem so the user understands what happened.
+        openModal('Copied, but PDF failed', `
+          <p style="color:var(--muted);font-size:13px">
+            The song was copied, but the sheet music file could not
+            be duplicated: ${escapeHtml((err && err.message) || 'unknown')}.
+            You can upload a new PDF from the song's ⋯ menu.
+          </p>
+        `, [{ label: 'OK', onclick: closeModal }]);
+        saveData();
+        renderMain();
+        renderSonglist();
+        return;
+      }
+    }
+
+    closeModal();
+    saveData();
+    renderMain();
+    renderSonglist();
+  };
 }
 
 // ═══════════════════════════ SONG ROW ACTIONS ═══════════════════════════
@@ -2712,7 +2984,15 @@ async function uploadSheetMusic(i) {
   const sl = currentSetlist();
   if (!sl || !sl.songs[i] || !sl.id) return;
   if (isCurrentSetlistReadOnly()) return;
-  const song = sl.songs[i];
+  // If this row is a link, redirect the write to the canonical song.
+  // The PDF lives under the canonical's setlist in Storage, so viewers
+  // of every linked setlist see the same file.
+  const rowHere = sl.songs[i];
+  const song    = findCanonicalSong(rowHere);
+  // Find the canonical's parent setlist for the storage path.
+  const parentSl = (data.setlists || []).find(x =>
+    (x.songs || []).some(s => s.id === song.id)
+  ) || sl;
   if (!song.id) ensureIds(data); // defensive
 
   const input = document.createElement('input');
@@ -2728,7 +3008,7 @@ async function uploadSheetMusic(i) {
       ]);
       return;
     }
-    const path = `${sl.id}/${song.id}.pdf`;
+    const path = `${parentSl.id}/${song.id}.pdf`;
     openModal('Uploading…', `
       <p style="color:var(--muted);font-size:13px">
         Uploading "${escapeHtml(file.name)}" (${(file.size/1024).toFixed(0)} KB)…
@@ -2739,6 +3019,9 @@ async function uploadSheetMusic(i) {
         .upload(path, file, { upsert: true, contentType: 'application/pdf' });
       if (error) throw error;
       song.sheet_music_path = path;
+      // Propagate the new PDF path onto all link rows locally so the 📄
+      // icon shows up everywhere before the next cloud fetch.
+      resolveSongLinks(data);
       await saveData();
       renderSonglist();
       renderMain();
@@ -2755,7 +3038,9 @@ async function uploadSheetMusic(i) {
   input.click();
 }
 
-// Open the PDF in a new tab via a short-lived signed URL.
+// Open the PDF in a new tab via a short-lived signed URL. For a
+// linked song the path still points at the canonical's file, so this
+// just works — the link overlay already copied sheet_music_path across.
 async function viewSheetMusic(i) {
   const sl = currentSetlist();
   if (!sl || !sl.songs[i]) return;
@@ -2779,7 +3064,8 @@ async function removeSheetMusic(i) {
   const sl = currentSetlist();
   if (!sl || !sl.songs[i]) return;
   if (isCurrentSetlistReadOnly()) return;
-  const song = sl.songs[i];
+  const rowHere = sl.songs[i];
+  const song    = findCanonicalSong(rowHere);  // remove from canonical
   if (!song.sheet_music_path) return;
   openModal('Remove sheet music?', `
     <p style="color:var(--muted);font-size:13px">
@@ -2795,6 +3081,8 @@ async function removeSheetMusic(i) {
           .remove([song.sheet_music_path]);
         if (error) throw error;
         song.sheet_music_path = null;
+        // Clear the overlay from every link pointing at this canonical.
+        resolveSongLinks(data);
         await saveData();
         renderSonglist();
         renderMain();
@@ -2812,7 +3100,11 @@ function renameSong(i) {
   const sl = currentSetlist();
   if (!sl || !sl.songs[i]) return;
   if (isCurrentSetlistReadOnly()) return; // belt-and-braces; UI hides the button
-  const song = sl.songs[i];
+  // If this is a linked song, rename the canonical instead — that way
+  // every setlist that references this song gets the new name on the
+  // next render. The local link row gets its display name updated too.
+  const rowHere = sl.songs[i];
+  const song    = findCanonicalSong(rowHere);
   openModal('Rename Song', `
     <input type="text" id="rename-song-input"
            placeholder="Song name…"
@@ -2823,6 +3115,9 @@ function renameSong(i) {
       const name = (document.getElementById('rename-song-input').value || '').trim();
       if (!name) return; // silently ignore empty — user can still cancel
       song.name = name;
+      // Propagate the new name to every link row in memory so the
+      // Songlist re-renders correctly before the next cloud fetch.
+      resolveSongLinks(data);
       saveData();
       closeModal();
       renderSonglist();
