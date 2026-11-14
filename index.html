@@ -1875,6 +1875,9 @@ async function unlockAudio() {
     audioUnlocked = true;
     // Now start loading samples in background
     loadAllSounds();
+    // Kick off the keep-alive so iOS doesn't close the context after
+    // long idle periods between songs during a concert.
+    startAudioKeepAlive();
   } catch(e) {
     console.warn('Audio unlock failed:', e);
   }
@@ -1889,14 +1892,25 @@ async function unlockAudio() {
 // running.
 function resumeIfSuspended() {
   try {
+    // state === 'closed' means iOS tore the context down for memory;
+    // we need a fresh one. Null it out so getAudioCtx() rebuilds.
+    if (audioCtx && audioCtx.state === 'closed') {
+      audioCtx = null;
+      buffersReady = false;      // samples were decoded by the dead context
+      if (typeof audioBuffers === 'object') {
+        for (const k in audioBuffers) delete audioBuffers[k];
+      }
+      if (typeof loadPromise !== 'undefined') loadPromise = null;
+      audioUnlocked = false;     // force a fresh unlock on next gesture
+    }
     if (audioCtx && audioCtx.state === 'suspended') {
       // resume() returns a Promise but we don't need to await — the
-      // next playback call will just scheduling into the (resuming)
+      // next playback call will just schedule into the (resuming)
       // context and iOS handles it.
       const p = audioCtx.resume();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
-    if (silentLoopEl && silentLoopEl.paused) {
+    if (silentLoopEl && (silentLoopEl.paused || silentLoopEl.ended)) {
       const p = silentLoopEl.play();
       if (p && typeof p.catch === 'function') p.catch(() => {});
     }
@@ -1908,6 +1922,43 @@ function resumeIfSuspended() {
   } catch (e) {
     console.warn('resumeIfSuspended failed:', e);
   }
+}
+
+// ── Audio keep-alive ────────────────────────────────────────────────
+// iOS Safari will fully close an idle AudioContext after a few minutes
+// of silence to save battery (resume() is a no-op once it's 'closed').
+// To prevent that mid-concert — the user plays a starting note, then
+// waits 3 minutes between songs, then wants the next starting note —
+// we schedule an inaudible sample through the context every 20 seconds.
+// It's literally zero amplitude, so it costs nothing and no one hears
+// it, but it keeps the context "warm" so iOS leaves it alone.
+let _audioKeepAliveTimer = null;
+function startAudioKeepAlive() {
+  if (_audioKeepAliveTimer) return;
+  _audioKeepAliveTimer = setInterval(() => {
+    try {
+      if (!audioCtx || audioCtx.state === 'closed') return;
+      if (audioCtx.state === 'suspended') {
+        // Try a silent resume too, in case iOS suspended it between
+        // user gestures.
+        const p = audioCtx.resume();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+      const buf = audioCtx.createBuffer(1, 1, 22050);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      // Route through a gain node pinned to 0 — belt-and-braces silence.
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      src.connect(gain).connect(audioCtx.destination);
+      src.start(0);
+      // Nudge the silent <audio> loop too if it died.
+      if (silentLoopEl && (silentLoopEl.paused || silentLoopEl.ended)) {
+        const p = silentLoopEl.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    } catch (_) { /* best-effort */ }
+  }, 20000);
 }
 
 // When the page becomes visible again (user switched back to the app,
