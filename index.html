@@ -1825,9 +1825,47 @@ const SILENT_WAV_DATA_URL =
   'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
 let silentLoopEl = null;
 
-// iOS requires AudioContext to be created AND resumed inside a user gesture
+// iOS requires AudioContext to be created AND resumed inside a user gesture.
+// After the phone has been locked / idle for a while, the context may
+// have been fully closed by iOS. If we naively check `audioUnlocked`
+// and return, we'll silently no-op forever. So the first thing we do
+// is detect a dead/closed context and reset the flags so we rebuild
+// from scratch inside this gesture.
 async function unlockAudio() {
-  if (audioUnlocked) return;
+  // Treat a closed context (or a missing one) as "not unlocked anymore"
+  // so the body below rebuilds everything. This is the core fix for
+  // "no sound after screen was locked for a while".
+  if (audioCtx && audioCtx.state === 'closed') {
+    audioCtx = null;
+    audioUnlocked = false;
+    buffersReady = false;
+    for (const k in audioBuffers) delete audioBuffers[k];
+    loadPromise = null;
+    // The old silentLoopEl may be in an unrecoverable state too —
+    // throw it away and let the branch below create a new one.
+    if (silentLoopEl) {
+      try { silentLoopEl.pause(); silentLoopEl.src = ''; } catch (_) {}
+      silentLoopEl = null;
+    }
+  }
+  if (audioUnlocked) {
+    // Already unlocked but the context may just be suspended — nudge it.
+    if (audioCtx && audioCtx.state === 'suspended') {
+      const p = audioCtx.resume();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+    // The silent HTMLAudioElement may have been paused/ended during
+    // lock. Restart it inside this user gesture so iOS accepts it.
+    if (silentLoopEl && (silentLoopEl.paused || silentLoopEl.ended)) {
+      const p = silentLoopEl.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+    // Re-assert the audio session category too.
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (_) {}
+    return;
+  }
   try {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
