@@ -1825,6 +1825,15 @@ const SILENT_WAV_DATA_URL =
   'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
 let silentLoopEl = null;
 
+// Flag that becomes true whenever the page visibility transitions to
+// hidden (home button, screen lock, switching to another app). On the
+// next user gesture we treat the audio pipeline as compromised and do
+// a full teardown + rebuild. That's the only reliable way to recover
+// from "another app grabbed the audio session" — iOS doesn't give us
+// a signal and audioCtx.state can lie (reports 'running' while no sound
+// comes out).
+let _audioMaybeBroken = false;
+
 // iOS requires AudioContext to be created AND resumed inside a user gesture.
 // After the phone has been locked / idle for a while, the context may
 // have been fully closed by iOS. If we naively check `audioUnlocked`
@@ -1832,17 +1841,36 @@ let silentLoopEl = null;
 // is detect a dead/closed context and reset the flags so we rebuild
 // from scratch inside this gesture.
 async function unlockAudio() {
-  // Treat a closed context (or a missing one) as "not unlocked anymore"
-  // so the body below rebuilds everything. This is the core fix for
-  // "no sound after screen was locked for a while".
+  // If the page has been backgrounded since the last play, don't
+  // trust any existing audio objects — close the context explicitly
+  // so iOS releases the audio session, then reset everything and
+  // fall through to the full rebuild path below.
+  if (_audioMaybeBroken) {
+    _audioMaybeBroken = false;
+    // Fire-and-forget close — don't await it, so synchronous callers
+    // of unlockAudio() (handlePianoPress etc.) get to the rebuild path
+    // immediately. iOS releases the audio session asynchronously; the
+    // new context we create below will claim it back.
+    if (audioCtx) {
+      try { audioCtx.close(); } catch (_) {}
+    }
+    audioCtx = null;
+    audioUnlocked = false;
+    buffersReady = false;
+    for (const k in audioBuffers) delete audioBuffers[k];
+    loadPromise = null;
+    if (silentLoopEl) {
+      try { silentLoopEl.pause(); silentLoopEl.src = ''; } catch (_) {}
+      silentLoopEl = null;
+    }
+  }
+  // Also handle the "iOS just closed it on us" case explicitly.
   if (audioCtx && audioCtx.state === 'closed') {
     audioCtx = null;
     audioUnlocked = false;
     buffersReady = false;
     for (const k in audioBuffers) delete audioBuffers[k];
     loadPromise = null;
-    // The old silentLoopEl may be in an unrecoverable state too —
-    // throw it away and let the branch below create a new one.
     if (silentLoopEl) {
       try { silentLoopEl.pause(); silentLoopEl.src = ''; } catch (_) {}
       silentLoopEl = null;
@@ -2004,10 +2032,21 @@ function startAudioKeepAlive() {
 // rejects resume() outside a user gesture; that's fine, the next tap
 // on a play button will resume it via the inline calls below.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') resumeIfSuspended();
+  if (document.visibilityState === 'hidden') {
+    // Mark the audio pipeline as suspect — on the next user gesture
+    // we'll tear it down and rebuild rather than trusting its state.
+    _audioMaybeBroken = true;
+  } else {
+    resumeIfSuspended();
+  }
 });
 window.addEventListener('pageshow',  resumeIfSuspended);
 window.addEventListener('focus',     resumeIfSuspended);
+// Switching apps or getting a phone call fires pagehide on iOS before
+// visibilitychange; flag the audio as suspect here too, just in case
+// the context dies before the next visibility event fires.
+window.addEventListener('pagehide',  () => { _audioMaybeBroken = true; });
+window.addEventListener('blur',      () => { _audioMaybeBroken = true; });
 
 function getAudioCtx() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -2669,9 +2708,15 @@ function renderPianoKeys() {
   updatePianoMarkers();
 }
 
-function handlePianoPress(noteName, isBlack) {
-  unlockAudio();
-  resumeIfSuspended(); // keep working after the app has been backgrounded
+async function handlePianoPress(noteName, isBlack) {
+  await unlockAudio();
+  resumeIfSuspended();
+  // If the context was torn down (page was backgrounded, iOS killed it,
+  // etc.), the sample buffers were cleared by unlockAudio. Reload before
+  // playing so the tap actually makes sound.
+  if (!buffersReady) {
+    try { await loadAllSounds(); } catch (_) {}
+  }
   playNote(noteName, 1.5);
 
   // flash key
